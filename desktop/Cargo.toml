@@ -142,6 +142,7 @@ specta.workspace = true
 specta-typescript.workspace = true
 tauri-specta.workspace = true
 tauri-plugin-dialog = "2"
+tauri-plugin-global-shortcut.workspace = true
 tauri-plugin-updater = { version = "=2.10.1", default-features = false, features = ["rustls-tls", "zip"] }
 base64.workspace = true
 minisign-verify = "=0.3.0"
@@ -174,6 +175,7 @@ gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+zephium-work-composition = { workspace = true, optional = true }
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
 x11rb = { version = "=0.13.2", features = ["xkb"] }
@@ -181,7 +183,6 @@ xkeysym = "=0.2.1"
 zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
 
 [target.'cfg(not(target_os = "linux"))'.dependencies]
-tauri-plugin-global-shortcut.workspace = true
 rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
