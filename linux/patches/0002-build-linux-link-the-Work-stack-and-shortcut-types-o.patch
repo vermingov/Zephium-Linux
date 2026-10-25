@@ -1,0 +1,43 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:27:44 +0100
+Subject: [PATCH 2/4] build(linux): link the Work stack and shortcut types on
+ Linux
+
+launcher_trigger names Shortcut, Code and Modifiers from the global-shortcut
+plugin on every platform, and page_assist needs zephium-work-composition
+whenever work-product is on. Linux had neither crate. The plugin is only
+linked for its types there: Linux still registers its launcher shortcut
+through the portal or X11, and the plugin is never initialised.
+---
+ desktop/Cargo.toml | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/desktop/Cargo.toml b/desktop/Cargo.toml
+index 32b8e202..3ee704f3 100644
+--- a/desktop/Cargo.toml
++++ b/desktop/Cargo.toml
+@@ -142,6 +142,7 @@ specta.workspace = true
+ specta-typescript.workspace = true
+ tauri-specta.workspace = true
+ tauri-plugin-dialog = "2"
++tauri-plugin-global-shortcut.workspace = true
+ tauri-plugin-updater = { version = "=2.10.1", default-features = false, features = ["rustls-tls", "zip"] }
+ base64.workspace = true
+ minisign-verify = "=0.3.0"
+@@ -174,6 +175,7 @@ gtk = "0.18"
+ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
++zephium-work-composition = { workspace = true, optional = true }
+ async-io = "=2.6.0"
+ futures-lite = "=2.6.1"
+ x11rb = { version = "=0.13.2", features = ["xkb"] }
+@@ -181,7 +183,6 @@ xkeysym = "=0.2.1"
+ zbus = { version = "=5.17.0", default-features = false, features = ["async-io"] }
+ 
+ [target.'cfg(not(target_os = "linux"))'.dependencies]
+-tauri-plugin-global-shortcut.workspace = true
+ rfd = { version = "=0.16.0", default-features = false, features = ["common-controls-v6"] }
+ 
+ [target.'cfg(target_os = "macos")'.dependencies]

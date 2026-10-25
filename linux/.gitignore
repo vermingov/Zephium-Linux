@@ -1,0 +1,7 @@
+/upstream/
+/build/
+/toolchain/
+/scratch/
+/state/
+/tools/test-only/*.so
+__pycache__/

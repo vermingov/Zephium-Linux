@@ -1,0 +1,20 @@
+[Unit]
+Description=Keep the Linux build of Zephium current
+Documentation=https://github.com/vermingov/Zephium-Linux/tree/linux/linux
+Wants=network-online.target
+After=network-online.target
+# A release build keeps every core busy for a long while; leave it for the charger.
+ConditionACPower=true
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/zephium-linux update --quiet
+# claude lives in ~/.local/bin; cargo and the rest in /usr/bin.
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin
+Nice=19
+IOSchedulingClass=idle
+CPUWeight=20
+IOWeight=20
+MemoryHigh=12G
+MemoryMax=14G
+TimeoutStartSec=3h

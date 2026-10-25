@@ -1,0 +1,45 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:27:43 +0100
+Subject: [PATCH 1/4] build(linux): stop refusing to build and start on Linux
+
+The platform script and run() both exited on Linux while the port was
+unfinished. The WebKitGTK composition, content stage and shortcuts are in
+place, so let the build and the app reach them.
+---
+ desktop/src/lib.rs                     | 6 ------
+ scripts/require-supported-platform.mjs | 8 +++-----
+ 2 files changed, 3 insertions(+), 11 deletions(-)
+
+diff --git a/desktop/src/lib.rs b/desktop/src/lib.rs
+index a6d07500..4704b7a3 100644
+--- a/desktop/src/lib.rs
++++ b/desktop/src/lib.rs
+@@ -5770,12 +5770,6 @@ fn install_async_runtime() {
+ 
+ #[cfg_attr(mobile, tauri::mobile_entry_point)]
+ pub fn run() {
+-    if cfg!(all(unix, not(target_os = "macos"))) {
+-        diagnostic!(
+-            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
+-        );
+-        std::process::exit(1);
+-    }
+     install_async_runtime();
+     APP_STARTED.get_or_init(std::time::Instant::now);
+     #[cfg(target_os = "macos")]
+diff --git a/scripts/require-supported-platform.mjs b/scripts/require-supported-platform.mjs
+index 4bef3f66..52f2a26d 100644
+--- a/scripts/require-supported-platform.mjs
++++ b/scripts/require-supported-platform.mjs
+@@ -1,7 +1,5 @@
+-// Linux builds do not compile yet, so stop before Cargo with a clear note.
+-if (process.platform === "linux") {
+-  console.error(
+-    "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news.",
+-  );
++// Zephium builds on macOS, Windows and Linux; stop elsewhere before Cargo.
++if (!["darwin", "win32", "linux"].includes(process.platform)) {
++  console.error(`Zephium isn't available on ${process.platform}.`);
+   process.exit(1);
+ }
