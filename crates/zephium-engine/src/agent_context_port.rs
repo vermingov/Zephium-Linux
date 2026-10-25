@@ -54,6 +54,11 @@ mod work_resource;
 pub(crate) mod work_resource_failure_diagnostic;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub use work_resource::{work_browser_monotonic_deadline, work_browser_monotonic_now};
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[path = "work_clock_unix.rs"]
+mod work_clock;
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+pub use work_clock::{work_browser_monotonic_deadline, work_browser_monotonic_now};
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use work_resource::{
     WorkActionTask, WorkHistoryBackTask, WorkLifecycleTask, WorkNavigationTask,
@@ -1649,7 +1654,13 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         lease: &zephium_agentic::WorkBrowserExecutionLease,
         context: zephium_agentic::ContextJoin,
     ) -> bool {
-        self.native_image_public_candidate(lease, context)
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return self.native_image_public_candidate(lease, context);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (lease, context);
+            false
+        }
     }
 
     fn claim_work_screenshot_source(
@@ -1657,7 +1668,13 @@ impl AgentBrowserPort for EngineAgentBrowserPort {
         lease: &zephium_agentic::WorkBrowserExecutionLease,
         image: &zephium_agentic::SemanticScreenshot,
     ) -> Option<Arc<dyn zephium_agentic::SemanticScreenshotSource>> {
-        self.claim_native_image_source(lease, image)
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        return self.claim_native_image_source(lease, image);
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            let _ = (lease, image);
+            None
+        }
     }
 
     #[cfg(all(
@@ -1926,7 +1943,8 @@ fn supports_native_request(request: &ContextNativeRequest) -> bool {
     }
 }
 
-const fn supports_owned_transition(kind: ContextOperationKind) -> bool {
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", test)), allow(dead_code))]
+const fn supports_owned_transition(kind: zephium_agentic::ContextOperationKind) -> bool {
     #[cfg(target_os = "windows")]
     {
         matches!(

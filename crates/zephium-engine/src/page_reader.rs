@@ -787,6 +787,7 @@ pub(crate) mod read {
     /// its element again: kind, text, name, destination, and which of the
     /// read's passages with the same facts it is. None when the read never
     /// had it.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(crate) fn mark_target(
         stored: &super::PageRead,
         n: u8,
