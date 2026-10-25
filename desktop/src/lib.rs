@@ -6647,12 +6647,6 @@ fn install_async_runtime() {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    if cfg!(all(unix, not(target_os = "macos"))) {
-        diagnostic!(
-            "Zephium isn't available on Linux yet. We're working on it; follow https://zephium.app for news."
-        );
-        std::process::exit(1);
-    }
     #[cfg(feature = "adblock-qa")]
     blocker_bench::refuse_bad_arguments();
     install_async_runtime();
