@@ -281,7 +281,7 @@ pub(crate) fn check(root: &Path) -> Result<(), String> {
             "#[cfg(feature = \"native-work\")] mod native;",
             "#[cfg(feature = \"native-work\")] pub use native::{NativeWorkComposition, TrustedWorkRequest};",
             "#[cfg(feature = \"macos-work\")] pub use native::NativeWorkComposition as MacosWorkComposition;",
-            "#[cfg(all(feature = \"native-work\", not(any(target_os = \"macos\", target_os = \"windows\"))))] compile_error!",
+            "#[cfg(all(feature = \"native-work\", not(any(target_os = \"macos\", target_os = \"windows\", target_os = \"linux\"))))] compile_error!",
             "#[cfg(feature = \"public-qualification\")] mod qualification;",
             "#[cfg(all(feature = \"navigation-qualification\", not(debug_assertions)))] compile_error!",
             "#[cfg(feature = \"navigation-qualification\")] #[doc(hidden)] pub mod navigation_qualification;",
