@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# A headless desktop for trying a Zephium build without touching the real one.
+#
+# sway with no screen in a runtime directory of its own, a private session
+# bus and scratch XDG directories: the browser inside never sees the real
+# profile, keyring or compositor. The output is 1920x1200 because that is the
+# extent the cae rig-pointer maps.
+#
+#   rig up                 start the compositor (and virtual input, if built)
+#   rig zephium [BINARY]   (re)start Zephium inside, with the scratch profile
+#   rig open URL           hand a URL to the running browser, as a desktop does
+#   rig shot FILE          screenshot the whole output
+#   rig move X Y | click | scroll DY | key [ctrl+]name | type TEXT
+#   rig log                the browser's stderr
+#   rig alive              whether the browser is still running
+#   rig fresh              forget the scratch profile
+#   rig down               stop all of it
+#
+# RIG_RUN and RIG_SCRATCH move the runtime and profile directories, so an
+# unattended smoke test never meets a rig someone is using by hand.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+PROJECT=$(dirname "$HERE")
+CAE_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/cae-rig
+OWN_CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/zephium-rig
+RUN=${RIG_RUN:-/tmp/zr-$(id -u)}
+SCRATCH=${RIG_SCRATCH:-$PROJECT/scratch}
+DEFAULT_BIN=$PROJECT/upstream/target/debug/zephium-desktop
+
+# sway is not installed here and need not be: the cae rig's unpacked copy is
+# used when there is one, otherwise the distribution's packages are fetched
+# and unpacked where nothing else will find them.
+SWAY_ROOT=
+need_sway() {
+    for root in "$CAE_CACHE/root" "$OWN_CACHE/root"; do
+        [ -x "$root/usr/bin/sway" ] && { SWAY_ROOT=$root; return; }
+    done
+    mkdir -p "$OWN_CACHE/packages" "$OWN_CACHE/root"
+    for url in $(pacman -Sp sway wlroots0.20 libliftoff swaybg 2>/dev/null); do
+        file=$OWN_CACHE/packages/$(basename "$url")
+        [ -f "$file" ] || curl -fsSL --max-time 120 -o "$file" "$url" || { echo "rig: cannot fetch $url" >&2; exit 1; }
+        bsdtar -xf "$file" -C "$OWN_CACHE/root"
+    done
+    SWAY_ROOT=$OWN_CACHE/root
+    [ -x "$SWAY_ROOT/usr/bin/sway" ] || { echo "rig: no sway after fetching" >&2; exit 1; }
+}
+
+alive() { [ -s "$RUN/$1.pid" ] && kill -0 "$(cat "$RUN/$1.pid")" 2>/dev/null; }
+
+# start NAME LOG CMD...: CMD as the leader of a new session, its pid (which is
+# also its process group) in NAME.pid. setsid forks when it has to, so $! would
+# name a parent that is already gone.
+start() {
+    local name=$1 log=$2; shift 2
+    rm -f "$RUN/$name.pid"
+    setsid sh -c 'echo $$ >"$1"; shift; exec "$@"' start "$RUN/$name.pid" "$@" >"$log" 2>&1 &
+    for _ in $(seq 1 40); do [ -s "$RUN/$name.pid" ] && break; sleep 0.05; done
+}
+
+inside() {
+    env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY -u SWAYSOCK \
+        XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 \
+        LD_LIBRARY_PATH="$SWAY_ROOT/usr/lib" "$@"
+}
+
+up() {
+    need_sway
+    if ! alive sway; then
+        fusermount3 -u -q "$RUN/doc" 2>/dev/null
+        rm -rf "$RUN"; mkdir -m 700 -p "$RUN"
+        cat >"$RUN/sway.conf" <<'CONF'
+output HEADLESS-1 resolution 1920x1200 position 0,0 scale 1 background #30343c solid_color
+xwayland disable
+default_border none
+focus_follows_mouse no
+CONF
+        start sway "$RUN/sway.log" env -u WAYLAND_DISPLAY -u DISPLAY -u SWAYSOCK -u HYPRLAND_INSTANCE_SIGNATURE \
+            XDG_RUNTIME_DIR="$RUN" WLR_BACKENDS=headless WLR_LIBINPUT_NO_DEVICES=1 \
+            LD_LIBRARY_PATH="$SWAY_ROOT/usr/lib" PATH="$SWAY_ROOT/usr/bin:$PATH" \
+            "$SWAY_ROOT/usr/bin/sway" -c "$RUN/sway.conf"
+        for _ in $(seq 1 100); do [ -S "$RUN/wayland-1" ] && break; sleep 0.05; done
+    fi
+    if ! alive pointer && [ -x "$CAE_CACHE/pointer/debug/rig-pointer" ]; then
+        [ -f "$RUN/us.keymap" ] || xkbcli compile-keymap --layout us >"$RUN/us.keymap"
+        [ -p "$RUN/input" ] || mkfifo "$RUN/input"
+        start pointer "$RUN/pointer.log" env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY \
+            XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 \
+            "$CAE_CACHE/pointer/debug/rig-pointer" "$RUN/input" "$RUN/us.keymap"
+        sleep 0.3
+    fi
+}
+
+# setsid gave the browser, its bus and its web processes one process group:
+# stop the group, or a child outlives the bus that started it.
+stop_zephium() {
+    alive zephium || { rm -f "$RUN/zephium.pid"; return; }
+    local group; group=$(cat "$RUN/zephium.pid")
+    kill -- "-$group" 2>/dev/null
+    for _ in $(seq 1 40); do kill -0 -- "-$group" 2>/dev/null || break; sleep 0.1; done
+    kill -9 -- "-$group" 2>/dev/null
+    rm -f "$RUN/zephium.pid"
+}
+
+zephium() {
+    local bin=${1:-$DEFAULT_BIN}
+    up; stop_zephium
+    mkdir -p "$SCRATCH"/{home,config,data,cache,state}
+    echo "$bin" >"$RUN/zephium.bin"
+    start zephium "$RUN/zephium.log" env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY -u SWAYSOCK \
+        XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 \
+        HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/config" XDG_DATA_HOME="$SCRATCH/data" \
+        XDG_CACHE_HOME="$SCRATCH/cache" XDG_STATE_HOME="$SCRATCH/state" \
+        ${RIG_ENV:-} dbus-run-session -- "$bin"
+}
+
+# A second launch with a URL, as a desktop would start it: on the running
+# browser's own session bus, which is where single-instance finds it.
+open_url() {
+    local leader child bus
+    leader=$(cat "$RUN/zephium.pid" 2>/dev/null)
+    child=$(pgrep -P "$leader" -f -- "$(cat "$RUN/zephium.bin" 2>/dev/null)" | head -1)
+    bus=$(tr '\0' '\n' </proc/"$child"/environ 2>/dev/null | sed -n 's/^DBUS_SESSION_BUS_ADDRESS=//p')
+    [ -n "$bus" ] || { echo "rig: no running Zephium to hand the URL to" >&2; exit 1; }
+    env -u HYPRLAND_INSTANCE_SIGNATURE -u DISPLAY XDG_RUNTIME_DIR="$RUN" WAYLAND_DISPLAY=wayland-1 \
+        HOME="$SCRATCH/home" XDG_CONFIG_HOME="$SCRATCH/config" XDG_DATA_HOME="$SCRATCH/data" \
+        XDG_CACHE_HOME="$SCRATCH/cache" XDG_STATE_HOME="$SCRATCH/state" DBUS_SESSION_BUS_ADDRESS="$bus" \
+        ${RIG_ENV:-} "$(cat "$RUN/zephium.bin")" "$1"
+}
+
+# A pipe nobody reads blocks its writer for good, so ask the reader first.
+send() { alive pointer || { echo "rig: no virtual input (rig up)" >&2; exit 1; }; echo "$*" >"$RUN/input"; }
+
+case "${1:-}" in
+    up) up ;;
+    zephium) shift; zephium "$@" ;;
+    shot) need_sway; inside grim "${2:?file}" ;;
+    open) open_url "${2:?url}" ;;
+    move | click | press | release | scroll | key | type) send "$@" ;;
+    log) cat "$RUN/zephium.log" ;;
+    alive) alive zephium ;;
+    fresh) stop_zephium; rm -rf "$SCRATCH" ;;
+    down)
+        stop_zephium
+        for p in pointer sway; do alive $p && kill -- "-$(cat "$RUN/$p.pid")"; done; true ;;
+    *) sed -n '2,15p' "$0"; exit 2 ;;
+esac

@@ -1,0 +1,35 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 25 Oct 2026 21:27:44 +0100
+Subject: [PATCH 4/4] fix(linux): size the chrome view when the window maps at
+ its requested size
+
+The chrome follows the window through a size request set in the container's
+size-allocate handler. GtkFixed has already allocated the chrome by then, and
+the resize that request queues is dropped when the toplevel keeps its size,
+as it does on sway and other compositors that map a window at exactly the
+size it asked for. The chrome stayed 1x1 and the window drew nothing. Give
+the chrome its rectangle in the same handler.
+---
+ desktop/src/platform/linux.rs | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/desktop/src/platform/linux.rs b/desktop/src/platform/linux.rs
+index 6ed55943..74069e34 100644
+--- a/desktop/src/platform/linux.rs
++++ b/desktop/src/platform/linux.rs
+@@ -204,6 +204,14 @@ fn install_composition(
+     let sized_chrome = chrome.clone();
+     fixed.connect_size_allocate(move |_, allocation| {
+         sized_chrome.set_size_request(allocation.width(), allocation.height());
++        // GtkFixed has already allocated the chrome at its previous request,
++        // and the resize the new request queues from inside this allocation
++        // is dropped when the toplevel keeps its size: a compositor that maps
++        // the window at exactly the size asked for leaves the chrome at 1x1.
++        let current = sized_chrome.allocation();
++        if (current.width(), current.height()) != (allocation.width(), allocation.height()) {
++            sized_chrome.size_allocate(allocation);
++        }
+     });
+     fixed.show_all();
+ 
