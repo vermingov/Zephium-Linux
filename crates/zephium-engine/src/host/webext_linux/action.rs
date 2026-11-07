@@ -315,6 +315,11 @@ fn open_popup(
     // that a nested view had trouble with.
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+        // With the trace on, the popup's console goes to the log, as the
+        // background's does.
+        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+            settings.set_enable_write_console_messages_to_stdout(true);
+        }
     }
     view.set_background_color(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
     extension_channel::listen(&view, channel);
