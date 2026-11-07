@@ -7706,6 +7706,7 @@ dependencies = [
  "zephium-core",
  "zephium-webext",
  "zephium-webext-macos",
+ "zephium-webext-process",
  "zeroize",
 ]
 
