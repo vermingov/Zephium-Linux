@@ -12,6 +12,17 @@ mod api;
 mod routing;
 mod scheme;
 
+/// Log one step of the runtime when `ZEPHIUM_WEBEXT_TRACE` is set; silent
+/// otherwise. For finding where an extension stops working.
+macro_rules! trace {
+    ($($argument:tt)*) => {
+        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+            eprintln!("webext: {}", format!($($argument)*));
+        }
+    };
+}
+pub(super) use trace;
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -287,7 +298,15 @@ fn start_background(context: &WebContext, channel: &Rc<Channel>, install: &Insta
     let allowlist = cors_allowlist(&install.hosts);
     view.set_cors_allowlist(&allowlist.iter().map(String::as_str).collect::<Vec<_>>());
     extension_channel::listen(&view, channel.clone());
-    view.load_uri(&format!("{}{}", install.origin(), path.trim_start_matches('/')));
+    let url = format!("{}{}", install.origin(), path.trim_start_matches('/'));
+    trace!("background of {} starts at {url}", install.extension_id);
+    view.connect_load_changed(|view, event| trace!("background {:?}: {event:?}", view.uri()));
+    view.connect_load_failed(|view, _, uri, error| {
+        trace!("background {:?} failed to load {uri}: {error}", view.uri());
+        false
+    });
+    view.connect_web_process_terminated(|view, reason| trace!("background {:?}: web process ended ({reason:?})", view.uri()));
+    view.load_uri(&url);
     Some(view)
 }
 

@@ -128,6 +128,7 @@ impl super::super::EngineHost {
             return sender.reply(&error(request, NO_RECEIVER));
         }
         let extension_id = sender.extension_id.clone();
+        super::trace!("{extension_id} sends a message to {} context(s)", targets.len());
         let token = state.routing.token();
         let body = json!({ "event": "runtime.onMessage", "args": [message, sender_info], "reply": token }).to_string();
         state.routing.waiting.insert(
@@ -142,6 +143,7 @@ impl super::super::EngineHost {
     }
 
     fn linux_message_counted(&mut self, profile: ProfileId, token: u64, count: u32) {
+        super::trace!("message {token}: a context had {count} listener(s)");
         let Some(waiting) = self.linux_waiting(profile, token) else {
             return;
         };

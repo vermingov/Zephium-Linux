@@ -62,6 +62,7 @@ fn serve(packages: &HashMap<String, Package>, request: &URISchemeRequest) {
         .web_view()
         .and_then(|view| view.uri())
         .is_some_and(|requester| requester.starts_with(&origin));
+    super::trace!("request {uri} (from the extension itself: {own})");
     if path == WORKER_SHIM_PATH && own {
         return respond(request, WORKER_SHIM.as_bytes().to_vec(), "text/javascript", None);
     }
@@ -128,6 +129,7 @@ fn respond(request: &URISchemeRequest, bytes: Vec<u8>, mime: &str, csp: Option<&
 }
 
 fn fail(request: &URISchemeRequest, reason: &str) {
+    super::trace!("refused {:?}: {reason}", request.uri());
     let mut error = gtk::glib::Error::new(gtk::gio::IOErrorEnum::NotFound, reason);
     request.finish_error(&mut error);
 }
