@@ -1,27 +1,29 @@
 //! Firefox add-ons from addons.mozilla.org.
 //!
-//! The Linux port saves no downloads yet, so every download is cancelled,
-//! except a `.xpi` file the person fetches from addons.mozilla.org. That one
-//! is saved to a private folder and handed to the browser, which shows the
-//! same install review as for a dropped file; nothing installs until the
-//! person confirms there.
+//! The Linux port saves no downloads, and every view refuses them. A `.xpi`
+//! file the person opens from addons.mozilla.org is the one exception: the
+//! view drops the response, and the file is fetched again here, saved to a
+//! private folder and handed to the browser, which shows the same install
+//! review as for a dropped file. Nothing installs until the person confirms
+//! there.
 
-use std::cell::Cell;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 
+use webkit2gtk::gio::prelude::InputStreamExt;
 use webkit2gtk::glib::object::Cast;
 use webkit2gtk::{
-    Download, DownloadExt, PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt, URIRequestExt,
-    WebView, WebViewExt,
+    PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt, URIRequestExt, WebView,
+    WebViewExt,
 };
+use soup::prelude::SessionExt;
 use zephium_core::ids::ProfileId;
 
 const ADDONS_HOST: &str = "addons.mozilla.org";
 /// Where addons.mozilla.org sends a file link on to.
 const ADDONS_FILES_HOST: &str = "addons.cdn.mozilla.net";
 /// The installer's own ceiling for a package.
-const MAX_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// Whether `url` is an add-on file on addons.mozilla.org, such as
 /// `https://addons.mozilla.org/firefox/downloads/file/123/name-1.0.xpi`, or
@@ -39,10 +41,10 @@ pub(crate) fn is_addon_file(url: &str) -> bool {
     url.scheme() == "https" && url.port().is_none() && place && path.ends_with(".xpi")
 }
 
-/// WebKit cannot show an add-on file and would drop it: on `view`, such a
-/// response becomes a download, which `take` then keeps.
-pub(crate) fn offer_as_download(view: &WebView) {
-    view.connect_decide_policy(|_, decision, kind| {
+/// On `view` of `profile`, an add-on file the page cannot show is dropped
+/// and fetched for review instead.
+pub(crate) fn offer_for_review(view: &WebView, profile: ProfileId) {
+    view.connect_decide_policy(move |_, decision, kind| {
         if kind != PolicyDecisionType::Response {
             return false;
         }
@@ -55,53 +57,49 @@ pub(crate) fn offer_as_download(view: &WebView) {
         if !is_addon_file(&url) {
             return false;
         }
-        decision.download();
+        decision.ignore();
+        trace(format_args!("fetching {url}"));
+        std::thread::spawn(move || match fetch(&url) {
+            Ok(path) => {
+                webkit2gtk::glib::MainContext::default().invoke(move || {
+                    let _ = crate::host::try_with(move |host| host.addon_downloaded(profile, path));
+                });
+            }
+            Err(reason) => trace(format_args!("{url} was not fetched: {reason}")),
+        });
         true
     });
 }
 
-/// Takes `download` if it is an add-on file; the caller cancels the rest.
-pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
-    let url = download.request().and_then(|request| request.uri()).map(|uri| uri.to_string()).unwrap_or_default();
-    trace(format_args!("download of {url} (an add-on file: {})", is_addon_file(&url)));
-    if !is_addon_file(&url) {
-        return false;
+/// Fetch `url` into a new private file, refusing more than the installer
+/// would take.
+fn fetch(url: &str) -> Result<PathBuf, String> {
+    let session = soup::Session::new();
+    let message = soup::Message::new("GET", url).map_err(|error| error.to_string())?;
+    let stream = session.send(&message, None::<&webkit2gtk::gio::Cancellable>).map_err(|error| error.to_string())?;
+    if message.status() != soup::Status::Ok {
+        return Err(format!("the server answered {:?}", message.status()));
     }
-    let Some(path) = destination() else {
-        return false;
-    };
-    let target = url::Url::from_file_path(&path).map(String::from).unwrap_or_default();
-    download.connect_decide_destination(move |download, _| {
-        trace(format_args!("saving to {target}"));
-        download.set_destination(&target);
-        true
-    });
-    download.connect_received_data(|download, _| {
-        if download.received_data_length() > MAX_BYTES {
-            download.cancel();
+    let path = destination().ok_or("no private folder to save to")?;
+    let mut file = std::fs::File::create(&path).map_err(|error| error.to_string())?;
+    let mut total = 0;
+    loop {
+        let chunk = stream.read_bytes(64 * 1024, None::<&webkit2gtk::gio::Cancellable>).map_err(|error| error.to_string())?;
+        if chunk.is_empty() {
+            break;
         }
-    });
-    let failed = Rc::new(Cell::new(false));
-    let failure = failed.clone();
-    let partial = path.clone();
-    download.connect_failed(move |_, error| {
-        trace(format_args!("failed: {error}"));
-        failure.set(true);
-        let _ = std::fs::remove_file(&partial);
-    });
-    // `finished` follows `failed` too.
-    download.connect_finished(move |_| {
-        trace(format_args!("finished; saved: {}", path.is_file()));
-        if failed.get() || !path.is_file() {
-            return;
+        total += chunk.len();
+        if total > MAX_BYTES {
+            drop(file);
+            let _ = std::fs::remove_file(&path);
+            return Err("the file is larger than an extension may be".into());
         }
-        let path = path.clone();
-        let _ = crate::host::try_with(move |host| host.addon_downloaded(profile, path));
-    });
-    true
+        file.write_all(&chunk).map_err(|error| error.to_string())?;
+    }
+    Ok(path)
 }
 
-/// One step of an add-on download, when `ZEPHIUM_WEBEXT_TRACE` is set.
+/// One step of an add-on fetch, when `ZEPHIUM_WEBEXT_TRACE` is set.
 fn trace(step: std::fmt::Arguments<'_>) {
     if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
         eprintln!("webext: add-on {step}");
@@ -122,7 +120,7 @@ fn restrict(folder: &Path) {
     let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700));
 }
 
-/// A name no other download uses: the process and the time.
+/// A name no other fetch uses: the process and the time.
 fn unique_name() -> String {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_nanos());
     format!("addon-{}-{nanos}.xpi", std::process::id())

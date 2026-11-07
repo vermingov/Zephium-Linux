@@ -434,18 +434,13 @@ pub fn configure(
     // the marker lives exactly as long as the context GLib object.
     let installed = unsafe { context.data::<bool>(DOWNLOAD_DENY_MARKER).is_some() };
     if !installed {
-        // Private profiles run no extensions, so they take no add-on either.
-        let profile = partition.profile();
-        context.connect_download_started(move |_, download| {
-            if expected_ephemeral || !addon_download::take(download, profile) {
-                download.cancel();
-            }
-        });
+        context.connect_download_started(|_, download| download.cancel());
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }
+    // Private profiles run no extensions, so they take no add-on either.
     if !expected_ephemeral {
-        addon_download::offer_as_download(&view);
+        addon_download::offer_for_review(&view, partition.profile());
     }
 
     // Extensions never run in private profiles, so their contexts get no
