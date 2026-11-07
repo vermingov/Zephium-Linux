@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Map, Value};
-use webkit2gtk::{WebView, WebViewExt};
+use webkit2gtk::{UserMessageExt, WebView, WebViewExt};
 use zephium_core::extensions::{
     ExtensionBrowserRequest, ExtensionBrowserRequestAction, ExtensionBrowserRequestId, ExtensionBrowserSurface,
     ExtensionBrowserTab, ExtensionBrowserWindow,
