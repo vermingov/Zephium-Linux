@@ -118,7 +118,7 @@ fn respond(request: &URISchemeRequest, bytes: Vec<u8>, mime: &str, csp: Option<&
     let stream = gtk::gio::MemoryInputStream::from_bytes(&gtk::glib::Bytes::from_owned(bytes));
     let response = URISchemeResponse::new(&stream, length);
     response.set_content_type(mime);
-    let headers = soup3::MessageHeaders::new(soup3::MessageHeadersType::Response);
+    let headers = soup::MessageHeaders::new(soup::MessageHeadersType::Response);
     if let Some(csp) = csp {
         headers.append("Content-Security-Policy", csp);
     }

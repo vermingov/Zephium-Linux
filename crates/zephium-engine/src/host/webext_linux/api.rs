@@ -237,7 +237,8 @@ impl super::super::EngineHost {
                     Some(value) => value.as_i64().into_iter().collect(),
                     None => Vec::new(),
                 };
-                for tab in numbers.into_iter().filter_map(|number| self.linux_tab_item(profile, number)) {
+                let tabs: Vec<ItemId> = numbers.into_iter().filter_map(|number| self.linux_tab_item(profile, number)).collect();
+                for tab in tabs {
                     self.linux_browser_request(profile, ExtensionBrowserRequestAction::CloseTab { tab });
                 }
                 Ok(Value::Null)
