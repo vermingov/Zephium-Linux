@@ -89,6 +89,9 @@ impl super::super::EngineHost {
                 let targets = self.linux_extension_pages(profile, &message.extension_id, Some(&from));
                 return self.linux_send_message(profile, message, id, payload, sender, targets);
             }
+            "scripting.executeScript" | "scripting.insertCSS" | "scripting.removeCSS" | "tabs.executeScript" | "tabs.insertCSS" | "tabs.removeCSS" => {
+                return self.linux_inject(profile, message, id, &api, &args);
+            }
             "tabs.sendMessage" => {
                 let options = args.get(2).cloned().unwrap_or(Value::Null);
                 let target = arg_i64(&args, 0).and_then(|tab| self.linux_tab_view(profile, tab));
@@ -106,6 +109,81 @@ impl super::super::EngineHost {
             Outcome::Answer(result) => reply_with(message, result),
             Outcome::Routed => {}
         }
+    }
+
+    /// `scripting.*` and MV2's `tabs.executeScript` / `insertCSS`: code or CSS
+    /// run in the extension's world of a tab it may touch.
+    fn linux_inject(&mut self, profile: ProfileId, message: Message, id: u64, api: &str, args: &[Value]) {
+        let mv2 = api.starts_with("tabs.");
+        let (tab, details) = if mv2 {
+            match args.first() {
+                Some(Value::Number(_)) => (arg_i64(args, 0), args.get(1).cloned().unwrap_or(Value::Null)),
+                _ => (None, args.first().cloned().unwrap_or(Value::Null)),
+            }
+        } else {
+            let injection = args.first().cloned().unwrap_or(Value::Null);
+            (injection["target"]["tabId"].as_i64(), injection)
+        };
+        let prepared = self.linux_injection(profile, &message.extension_id, tab, api, &details);
+        let (view, code) = match prepared {
+            Ok(prepared) => prepared,
+            Err(reason) => return message.reply(&error(id, &reason)),
+        };
+        let run = webkit2gtk::UserMessage::new(
+            zephium_webext_process::RUN_MESSAGE,
+            Some(&gtk::glib::ToVariant::to_variant(&(message.extension_id.as_str(), code.as_str()))),
+        );
+        view.send_message_to_page(&run, None::<&gtk::gio::Cancellable>, move |reply| {
+            let answer = reply
+                .ok()
+                .and_then(|reply| reply.parameters())
+                .and_then(|parameters| parameters.get::<(String,)>())
+                .and_then(|(text,)| serde_json::from_str::<Value>(&text).ok())
+                .unwrap_or_else(|| json!({ "error": "The page could not be reached." }));
+            match answer.get("error").and_then(Value::as_str) {
+                Some(reason) => message.reply(&error(id, reason)),
+                None if mv2 => message.reply(&ok(id, json!([answer["ok"]]))),
+                None => message.reply(&ok(id, json!([{ "frameId": 0, "result": answer["ok"] }]))),
+            }
+        });
+    }
+
+    /// The tab's view and the code to run there, once the extension is
+    /// allowed to: host permission for the tab's address, or `activeTab`.
+    fn linux_injection(&mut self, profile: ProfileId, extension_id: &str, tab: Option<i64>, api: &str, details: &Value) -> Result<(WebView, String), String> {
+        let item = match tab {
+            Some(number) => self.linux_tab_item(profile, number),
+            None => self.linux_focused_tab(profile),
+        }
+        .ok_or("No tab with that id.")?;
+        let view = {
+            use wry::WebViewExtUnix;
+            self.views.get(&item).map(|observed| observed.view.webview()).ok_or("The tab is not loaded.")?
+        };
+        let url = view.uri().map(|uri| uri.to_string()).unwrap_or_default();
+        let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
+        let allowed = install.active_tabs.contains(&item) || any_matches(&install.hosts, &url);
+        if !allowed {
+            return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());
+        }
+        let files: Vec<String> = match &details["files"] {
+            Value::Array(files) => files.iter().filter_map(|file| file.as_str().map(str::to_owned)).collect(),
+            _ => details["file"].as_str().map(str::to_owned).into_iter().collect(),
+        };
+        let mut source = files.iter().map(|file| read_package_text(&install.root, file)).collect::<Result<Vec<_>, _>>()?.join("\n;");
+        let inline = details["code"].as_str().or(details["css"].as_str()).unwrap_or_default();
+        if !inline.is_empty() {
+            source.push_str(inline);
+        }
+        let code = if api.ends_with("insertCSS") {
+            insert_css(&source)
+        } else if api.ends_with("removeCSS") {
+            remove_css(&source)
+        } else {
+            source
+        };
+        // The API layer goes first, so injected code can use chrome.*.
+        Ok((view, format!("{}\n;{code}", zephium_webext_linux::SCRIPT)))
     }
 
     fn linux_call(&mut self, profile: ProfileId, message: &Message, from: &Endpoint, api: &str, args: &[Value]) -> Outcome {
@@ -634,6 +712,34 @@ fn message_argument(args: &[Value]) -> Value {
 
 fn is_extension_id(text: &str) -> bool {
     text.len() == 32 && text.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
+}
+
+/// A text file of the package, refusing paths that would leave it.
+fn read_package_text(root: &std::path::Path, path: &str) -> Result<String, String> {
+    let relative = std::path::Path::new(path.trim_start_matches('/'));
+    if relative.components().any(|part| !matches!(part, std::path::Component::Normal(_))) {
+        return Err(format!("{path} is outside the extension."));
+    }
+    std::fs::read_to_string(root.join(relative)).map_err(|reason| format!("{path}: {reason}"))
+}
+
+/// CSS goes into the page as a `<style>` marked with its own hash, so
+/// `removeCSS` with the same text finds it again.
+fn insert_css(css: &str) -> String {
+    format!(
+        r#"(() => {{ const style = document.createElement("style"); style.dataset.zephiumCss = "{}"; style.textContent = {}; (document.head || document.documentElement).append(style); }})()"#,
+        css_mark(css),
+        Value::String(css.to_owned())
+    )
+}
+
+fn remove_css(css: &str) -> String {
+    format!(r#"document.querySelectorAll('style[data-zephium-css="{}"]').forEach((style) => style.remove())"#, css_mark(css))
+}
+
+fn css_mark(css: &str) -> String {
+    let hash = css.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+    format!("{hash:016x}")
 }
 
 fn strings(value: &Value) -> Vec<String> {

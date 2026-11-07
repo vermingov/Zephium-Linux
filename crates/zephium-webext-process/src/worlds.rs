@@ -36,6 +36,10 @@ pub(crate) struct World {
 }
 
 impl World {
+    pub(crate) fn raw(&self) -> *mut WebKitScriptWorld {
+        self.raw
+    }
+
     pub(crate) fn new(extension_id: &str) -> Self {
         let name = CString::new(format!("zephium-extension-{extension_id}")).expect("ID has no NUL");
         Self { raw: unsafe { webkit_script_world_new_with_name(name.as_ptr()) } }

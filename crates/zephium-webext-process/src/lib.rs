@@ -19,6 +19,8 @@ mod events;
 mod ffi;
 pub mod matching;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod run;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod worlds;
 
 /// Name of the message a world sends to the browser. Parameters `(ssts)`:
@@ -28,6 +30,10 @@ pub const SEND_MESSAGE: &str = "zephium-webext.send";
 /// extension's worlds there. Parameters `(sts)`: extension ID, frame ID (0 for
 /// every frame), body.
 pub const EVENT_MESSAGE: &str = "zephium-webext.event";
+/// Name of the message the browser sends a page to run code in an
+/// extension's world of its main frame. Parameters `(ss)`: extension ID,
+/// code. The reply's `(s)` is JSON: `{"ok": result}` or `{"error": message}`.
+pub const RUN_MESSAGE: &str = "zephium-webext.run";
 /// Sender kind of a content script's isolated world.
 pub const KIND_CONTENT: &str = "content";
 /// Sender kind of an extension's own page (background, popup, options).

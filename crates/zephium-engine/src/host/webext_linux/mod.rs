@@ -85,6 +85,9 @@ pub(super) struct Install {
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
+    /// Tabs the user clicked the extension's action on: `activeTab` lets it
+    /// script them although it has no host permission for them.
+    pub(super) active_tabs: HashSet<zephium_core::ids::ItemId>,
 }
 
 impl Install {
@@ -140,6 +143,7 @@ impl Install {
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
             popup: None,
+            active_tabs: HashSet::new(),
             manifest,
         })
     }

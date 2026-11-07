@@ -238,6 +238,7 @@ impl super::super::EngineHost {
         if !install.action.enabled.get(Some(number)) {
             return ExtensionActionSettlement::Rejected(ExtensionActionRejection::ActionDisabled);
         }
+        install.active_tabs.insert(request.tab());
         match install.action.popup(Some(number)) {
             Some(popup) => {
                 let (Some(context), Some(channel), Some(parent)) = (context, channel, crate::platform::imp::container()) else {

@@ -292,6 +292,7 @@
     const tabs = namespace("tabs", {
       query: undefined, get: undefined, getCurrent: undefined, create: undefined, update: undefined,
       remove: undefined, reload: undefined, duplicate: undefined, sendMessage: undefined,
+      executeScript: undefined, insertCSS: undefined, removeCSS: undefined,
       connect: connector("tabs.connect"), captureVisibleTab: undefined, detectLanguage: undefined,
     }, ["onCreated", "onUpdated", "onActivated", "onRemoved", "onReplaced", "onMoved", "onHighlighted"]);
     tabs.TAB_ID_NONE = -1;
@@ -320,7 +321,13 @@
       browserAction: action,
       pageAction: action,
       scripting: namespace("scripting", {
-        executeScript: undefined, insertCSS: undefined, removeCSS: undefined,
+        // A function cannot travel as JSON: it goes as the code that calls it.
+        executeScript: (injection, callback) => {
+          const { func, args, ...rest } = injection || {};
+          const code = typeof func === "function" ? `(${func})(...${JSON.stringify(args || [])})` : undefined;
+          return method("scripting.executeScript")({ ...rest, code }, callback);
+        },
+        insertCSS: undefined, removeCSS: undefined,
       }),
       alarms: namespace("alarms", {
         create: undefined, get: undefined, getAll: undefined, clear: undefined, clearAll: undefined,

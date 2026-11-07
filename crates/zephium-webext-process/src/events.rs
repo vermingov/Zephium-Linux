@@ -17,7 +17,7 @@ use glib::ToVariant;
 
 use crate::channel;
 use crate::ffi::*;
-use crate::EVENT_MESSAGE;
+use crate::{run, EVENT_MESSAGE, RUN_MESSAGE};
 
 /// The world a listener belongs to.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -92,7 +92,12 @@ unsafe extern "C" fn message_received(
     _data: *mut c_void,
 ) -> gboolean {
     let name = webkit_user_message_get_name(message);
-    if name.is_null() || CStr::from_ptr(name).to_str() != Ok(EVENT_MESSAGE) {
+    let name = if name.is_null() { None } else { CStr::from_ptr(name).to_str().ok() };
+    if name == Some(RUN_MESSAGE) {
+        run::run(page, message);
+        return 1;
+    }
+    if name != Some(EVENT_MESSAGE) {
         return 0;
     }
     let parameters = webkit_user_message_get_parameters(message);
