@@ -90,8 +90,10 @@ unsafe extern "C" fn send(args: *mut glib::ffi::GPtrArray, data: *mut c_void) {
 unsafe extern "C" fn replied(page: *mut c_void, result: *mut GAsyncResult, data: *mut c_void) {
     let reply: *mut JSCValue = data.cast();
     let answer = webkit_web_page_send_message_to_view_finish(page, result, std::ptr::null_mut());
-    let text = (!answer.is_null())
-        .then(|| glib::Variant::from_glib_none(webkit_user_message_get_parameters(answer)))
+    // A reply without parameters is an answer with no text, not an error.
+    let parameters = if answer.is_null() { std::ptr::null_mut() } else { webkit_user_message_get_parameters(answer) };
+    let text = (!parameters.is_null())
+        .then(|| glib::Variant::from_glib_none(parameters))
         .and_then(|parameters| parameters.get::<(String,)>())
         .map(|(text,)| text);
     let context = jsc_value_get_context(reply);
