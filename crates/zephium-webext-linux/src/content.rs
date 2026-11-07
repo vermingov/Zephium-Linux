@@ -31,20 +31,28 @@ pub fn groups(package: &Path, manifest: &Manifest) -> Result<Vec<Group>, String>
         .into_iter()
         .filter(|script| script.world == World::Isolated)
         .map(|script| {
-            Ok(Group {
-                js: read_all(package, &script.js)?,
-                css: read_all(package, &script.css)?,
-                matches: script.matches,
-                exclude_matches: script.exclude_matches,
-                run_at: match script.run_at {
-                    RunAt::DocumentStart => "document_start",
-                    RunAt::DocumentEnd => "document_end",
-                    RunAt::DocumentIdle => "document_idle",
-                },
-                all_frames: script.all_frames,
-            })
+            let run_at = match script.run_at {
+                RunAt::DocumentStart => "document_start",
+                RunAt::DocumentEnd => "document_end",
+                RunAt::DocumentIdle => "document_idle",
+            };
+            group(package, script.matches, script.exclude_matches, &script.js, &script.css, run_at, script.all_frames)
         })
         .collect()
+}
+
+/// One group with its files' text: a manifest entry, or a script the
+/// extension registered at run time.
+pub fn group(
+    package: &Path,
+    matches: Vec<String>,
+    exclude_matches: Vec<String>,
+    js: &[String],
+    css: &[String],
+    run_at: &'static str,
+    all_frames: bool,
+) -> Result<Group, String> {
+    Ok(Group { js: read_all(package, js)?, css: read_all(package, css)?, matches, exclude_matches, run_at, all_frames })
 }
 
 /// The groups as the web-process plugin runs them: scripts only. A group's

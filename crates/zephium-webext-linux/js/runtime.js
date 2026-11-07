@@ -328,6 +328,8 @@
           return method("scripting.executeScript")({ ...rest, code }, callback);
         },
         insertCSS: undefined, removeCSS: undefined,
+        registerContentScripts: undefined, getRegisteredContentScripts: undefined,
+        unregisterContentScripts: undefined, updateContentScripts: undefined,
       }),
       declarativeNetRequest: Object.assign(namespace("declarativeNetRequest", {
         getEnabledRulesets: undefined, updateEnabledRulesets: undefined,

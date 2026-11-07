@@ -11,6 +11,7 @@ mod action;
 mod api;
 mod dnr;
 mod events;
+mod registered;
 mod routing;
 mod scheme;
 
@@ -96,6 +97,9 @@ pub(super) struct Install {
     pub(super) background: Option<WebView>,
     pub(super) storage: api::Storage,
     pub(super) dnr: dnr::Rules,
+    /// The manifest's content scripts, and those registered at run time.
+    manifest_groups: Vec<zephium_webext_linux::content::Group>,
+    pub(super) registered: registered::Registered,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -115,6 +119,15 @@ impl Install {
         self.background.iter().cloned().chain(self.popup.as_ref().map(|popup| popup.view.clone())).collect()
     }
 
+    /// The plugin's groups: the manifest's scripts, then the registered ones.
+    pub(super) fn refresh_groups(&mut self) {
+        let groups = self.manifest_groups.iter().cloned().chain(self.registered.groups(&self.root)).collect();
+        self.channel.groups = zephium_webext_linux::content::runnable(groups)
+            .into_iter()
+            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
+            .collect();
+    }
+
     fn prepare(
         load: &WebExtensionLoad,
         generation: ExtensionRuntimeGeneration,
@@ -123,10 +136,7 @@ impl Install {
         let manifest = Manifest::load(&load.root).map_err(|error| error.to_string())?;
         let origin = format!("chrome-extension://{}/", load.extension_id);
         let info = zephium_webext_linux::info::info(&load.extension_id, &origin, &load.root, &manifest);
-        let groups = zephium_webext_linux::content::runnable(zephium_webext_linux::content::groups(&load.root, &manifest)?)
-            .into_iter()
-            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
-            .collect();
+        let manifest_groups = zephium_webext_linux::content::groups(&load.root, &manifest)?;
         let loaded = WebExtensionLoaded {
             name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
             version: manifest.version().unwrap_or("0").to_owned(),
@@ -137,7 +147,7 @@ impl Install {
             accessible: web_accessible(&manifest),
             background: background_page(&manifest),
         };
-        Ok(Self {
+        let mut install = Self {
             id: load.install,
             extension_id: load.extension_id.clone(),
             generation,
@@ -147,20 +157,24 @@ impl Install {
                 id: load.extension_id.clone(),
                 info,
                 granted: load.match_patterns.clone(),
-                groups,
+                groups: Vec::new(),
             },
             package,
             permissions: load.permissions.clone(),
             hosts: load.match_patterns.clone(),
             background: None,
             dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
+            manifest_groups,
+            registered: registered::Registered::open(storage.as_deref()),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
             popup: None,
             active_tabs: HashSet::new(),
             manifest,
-        })
+        };
+        install.refresh_groups();
+        Ok(install)
     }
 
     fn stop(&mut self) {
