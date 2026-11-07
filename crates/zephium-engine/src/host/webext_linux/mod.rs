@@ -70,6 +70,9 @@ pub(super) struct ProfileExtensions {
     packages: scheme::Packages,
     installs: HashMap<ExtensionInstallId, Install>,
     routing: routing::Routing,
+    /// The browser window that last had focus: a popup, in a window of its
+    /// own, still belongs to it, as Chrome's "current window".
+    last_focused: Option<zephium_core::ids::WindowId>,
 }
 
 impl ProfileExtensions {

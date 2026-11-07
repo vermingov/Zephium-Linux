@@ -77,6 +77,9 @@ impl super::super::EngineHost {
     /// state they start from, not news.
     pub(in crate::host) fn linux_surface_changed(&mut self, next: &ExtensionBrowserSurface) {
         let profile = next.profile();
+        if let (Some(focused), Some(state)) = (next.focused(), self.linux_extensions.profiles.get_mut(&profile)) {
+            state.last_focused = Some(focused);
+        }
         let Some(previous) = self.extension_browser_surfaces.get(&profile).cloned() else {
             return;
         };

@@ -371,24 +371,32 @@ fn open_popup(
         super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
     });
 
-    // Once loaded, the window takes the page's own size.
+    // Once loaded, the window takes the page's own size, and again once
+    // the page's script has drawn what it shows.
     let sized_window = window.clone();
     view.connect_load_changed(move |view, event| {
         if event != webkit2gtk::LoadEvent::Finished {
             return;
         }
-        let window = sized_window.clone();
-        view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
-            if let Some((width, height)) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
-                window.resize(width, height);
-            }
-        });
+        for delay in [0, 250, 1000] {
+            let (view, window) = (view.clone(), sized_window.clone());
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || fit_popup(&view, window));
+        }
     });
 
     view.load_uri(url);
     window.show_all();
     window.present();
     Popup { view, window }
+}
+
+/// Size `window` to its page.
+fn fit_popup(view: &WebView, window: gtk::Window) {
+    view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
+        if let Some((width, height)) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
+            window.resize(width, height);
+        }
+    });
 }
 
 /// `"width,height"` as the popup's size within Chrome's bounds.

@@ -77,9 +77,13 @@ impl super::super::EngineHost {
             return message.reply(&error(id, "The extension is not running."));
         }
         let from = Endpoint { view: message.view.clone(), frame: message.frame_id };
+        super::trace!("{} calls {api}", message.extension_id);
         let reply_with = |message: Message, result: Result<Value, String>| match result {
             Ok(value) => message.reply(&ok(id, value)),
-            Err(reason) => message.reply(&error(id, &reason)),
+            Err(reason) => {
+                super::trace!("{} call failed: {reason}", message.extension_id);
+                message.reply(&error(id, &reason))
+            }
         };
         // The calls that answer later take the request itself.
         match api.as_str() {
@@ -355,7 +359,8 @@ impl super::super::EngineHost {
                 windows.into_iter().find(|window| window["id"] == wanted).ok_or_else(|| "No window with that id.".into())
             }
             "getCurrent" | "getLastFocused" => {
-                let current = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone());
+                let current =
+                    self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
                 Ok(windows
                     .iter()
                     .find(|window| current.as_ref().is_some_and(|id| &window["id"] == id))
@@ -503,8 +508,23 @@ impl super::super::EngineHost {
 
     fn linux_focused_tab(&self, profile: ProfileId) -> Option<ItemId> {
         let surface = self.extension_browser_surfaces.get(&profile)?;
-        let window = surface.windows().iter().find(|window| Some(window.id()) == surface.focused()).or(surface.windows().first())?;
+        let current = self.linux_current_window(profile);
+        let window = surface.windows().iter().find(|window| Some(window.id()) == current).or(surface.windows().first())?;
         window.active()
+    }
+
+    /// The focused browser window, or the one that last was while a popup
+    /// window has focus.
+    fn linux_current_window(&self, profile: ProfileId) -> Option<zephium_core::ids::WindowId> {
+        let surface = self.extension_browser_surfaces.get(&profile)?;
+        let remembered = self.linux_extensions.profiles.get(&profile).and_then(|state| state.last_focused);
+        surface.focused().or(remembered).filter(|id| surface.windows().iter().any(|window| window.id() == *id))
+    }
+
+    fn linux_current_window_number(&mut self, profile: ProfileId) -> Option<Value> {
+        let window = self.linux_current_window(profile)?;
+        let state = self.linux_extensions.profiles.get_mut(&profile)?;
+        Some(json!(state.routing.windows.number(window)))
     }
 
     /// Every view of the profile's tabs, for events every context gets.
@@ -577,10 +597,8 @@ impl super::super::EngineHost {
     }
 
     fn linux_query_tabs(&mut self, profile: ProfileId, message: &Message, query: &Value) -> Vec<Value> {
-        let current_window = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| {
-            let windows = self.linux_all_windows(profile, false);
-            windows.iter().find(|window| window["focused"] == true).map(|window| window["id"].clone())
-        });
+        let current_window =
+            self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
         let wants_current = query["currentWindow"].as_bool() == Some(true)
             || query["lastFocusedWindow"].as_bool() == Some(true)
             || query["windowId"].as_i64() == Some(-2);
