@@ -382,7 +382,11 @@ pub enum AppLinkSource {
 /// require the engine's live, profile-specific installation grant. This is not
 /// permission to load an extension or to expose its resources to web pages.
 pub fn is_browser_target(url: &Url) -> bool {
-    is_allowed(url) || (cfg!(target_os = "windows") && extension_document_id(url).is_some())
+    // Extension pages open as ordinary tabs where the browser serves the
+    // extension's origin itself: WebView2 on Windows, the port's own scheme
+    // handler on Linux.
+    is_allowed(url)
+        || (cfg!(any(target_os = "windows", target_os = "linux")) && extension_document_id(url).is_some())
 }
 
 pub fn is_browser_target_str(target: &str) -> bool {

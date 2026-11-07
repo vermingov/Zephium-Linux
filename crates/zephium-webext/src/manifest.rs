@@ -266,6 +266,16 @@ impl Manifest {
         })
     }
 
+    /// A Firefox add-on's own ID, where Firefox reads it: the current
+    /// `browser_specific_settings.gecko.id`, or the older
+    /// `applications.gecko.id`.
+    pub fn gecko_id(&self) -> Option<&str> {
+        ["browser_specific_settings", "applications"]
+            .iter()
+            .find_map(|key| self.raw[*key]["gecko"]["id"].as_str())
+            .filter(|id| !id.is_empty())
+    }
+
     pub fn options_page(&self) -> Option<String> {
         self.raw["options_ui"]["page"]
             .as_str()
@@ -726,5 +736,21 @@ mod tests {
         assert_eq!(normalize_resource("a/../../b"), None);
         assert_eq!(normalize_resource("a\\b"), None);
         assert_eq!(normalize_resource("/"), None);
+    }
+}
+
+#[cfg(test)]
+mod gecko_tests {
+    use super::Manifest;
+    use serde_json::json;
+
+    #[test]
+    fn gecko_id_is_read_where_firefox_reads_it() {
+        let current = json!({"browser_specific_settings": {"gecko": {"id": "a@b"}}});
+        let older = json!({"applications": {"gecko": {"id": "{1234}"}}});
+        assert_eq!(Manifest::from_value(current).gecko_id(), Some("a@b"));
+        assert_eq!(Manifest::from_value(older).gecko_id(), Some("{1234}"));
+        assert_eq!(Manifest::from_value(json!({"name": "chrome only"})).gecko_id(), None);
+        assert_eq!(Manifest::from_value(json!({"browser_specific_settings": {"gecko": {"id": ""}}})).gecko_id(), None);
     }
 }

@@ -37,6 +37,22 @@ fn compat_layer() -> prepare::CompatLayer {
         .with_diagnostics(DIAGNOSTICS)
 }
 
+/// On Linux the compatibility layer is the whole API: WebKitGTK has no
+/// extension engine underneath it (see the port's docs/extensions.md).
+#[cfg(target_os = "linux")]
+const ADDED_PERMISSIONS: &[&str] = &["activeTab"];
+
+#[cfg(target_os = "linux")]
+pub(super) fn compat_revision(_access: &super::Access) -> String {
+    // FNV-1a over the layer and what it adds, as on macOS.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in zephium_webext_linux::SCRIPT.bytes().chain(ADDED_PERMISSIONS.concat().bytes()) {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    format!("{hash:016x}")[..12].to_owned()
+}
+
 #[cfg(target_os = "windows")]
 pub(super) fn compat_revision(access: &super::Access) -> String {
     zephium_webext::windows::access_revision(match access {
@@ -66,6 +82,12 @@ pub(super) fn prepare_package(
         };
         zephium_webext::windows::prepare(dir, sites)?;
         Ok(prepare::PrepareReport::default())
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let _ = access;
+        let layer = prepare::CompatLayer::new(zephium_webext_linux::SCRIPT).with_permissions(ADDED_PERMISSIONS);
+        prepare::prepare(dir, &layer).map_err(|error| error.to_string())
     }
 }
 

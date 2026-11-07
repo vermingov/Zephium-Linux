@@ -27,6 +27,14 @@ impl ExtensionId {
         Self::from_public_key(path.as_bytes())
     }
 
+    /// The ID a Firefox add-on gets: derived from its Gecko ID
+    /// (`browser_specific_settings.gecko.id`), so the add-on keeps one ID and
+    /// origin wherever its `.xpi` was installed from.
+    pub fn from_gecko_id(gecko_id: &str) -> Self {
+        let digest = Sha256::digest(format!("gecko:{gecko_id}").as_bytes());
+        Self::from_hash_prefix(digest[..16].try_into().expect("SHA-256 is 32 bytes"))
+    }
+
     pub(crate) fn from_hash_prefix(prefix: &[u8; 16]) -> Self {
         let id = prefix
             .iter()
@@ -103,5 +111,20 @@ mod tests {
         assert_eq!(json, "\"abcdefghijklmnopabcdefghijklmnop\"");
         assert_eq!(serde_json::from_str::<ExtensionId>(&json).unwrap(), id);
         assert!(serde_json::from_str::<ExtensionId>("\"zz\"").is_err());
+    }
+}
+
+#[cfg(test)]
+mod gecko_tests {
+    use super::ExtensionId;
+
+    #[test]
+    fn gecko_ids_map_to_stable_chrome_style_ids() {
+        let first = ExtensionId::from_gecko_id("uBlock0@raymondhill.net");
+        assert_eq!(first, ExtensionId::from_gecko_id("uBlock0@raymondhill.net"));
+        assert!(ExtensionId::parse(first.as_str()).is_some());
+        assert_ne!(first, ExtensionId::from_gecko_id("{d10d0bf8-f5b5-c8b4-a8b2-2b9879e08c5d}"));
+        // A Gecko ID never collides with the same text taken as a path.
+        assert_ne!(first, ExtensionId::from_source_path("uBlock0@raymondhill.net"));
     }
 }

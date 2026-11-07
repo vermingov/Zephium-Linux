@@ -33,11 +33,11 @@ impl Sink {
 #[derive(Clone)]
 pub(super) struct EventPermit {
     state: Arc<Mutex<EventPermitState>>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
     extensions: Option<ExtensionNavigationGrants>,
 }
 
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
 pub(super) type ExtensionNavigationGrants = Arc<Mutex<std::collections::HashSet<String>>>;
 
 enum EventPermitState {
@@ -54,7 +54,7 @@ impl EventPermit {
     pub(super) fn inactive() -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Inactive)),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
             extensions: None,
         }
     }
@@ -62,12 +62,12 @@ impl EventPermit {
     pub(super) fn bound(token: &Arc<AtomicBool>) -> Self {
         Self {
             state: Arc::new(Mutex::new(EventPermitState::Bound(Arc::downgrade(token)))),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
             extensions: None,
         }
     }
 
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
     pub(super) fn with_extensions(mut self, grants: ExtensionNavigationGrants) -> Self {
         self.extensions = Some(grants);
         self
@@ -86,7 +86,7 @@ impl EventPermit {
         if navigation::is_allowed_str(target) {
             return true;
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", all(unix, not(target_os = "macos"))))]
         if let (Some(grants), Ok(url)) = (&self.extensions, url::Url::parse(target)) {
             return navigation::extension_document_id(&url)
                 .is_some_and(|id| grants.lock().is_ok_and(|grants| grants.contains(id)));
