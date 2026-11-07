@@ -1,0 +1,131 @@
+# The fork's only workflow: build the Linux port the way zephium-linux builds it
+# at home. Upstream's macOS and Windows workflows are left out of this branch and
+# switched off on the fork by zephium-linux itself.
+#
+# Every hour it also catches main up with upstream: the port is replayed onto
+# upstream's newest commit, built, and pushed only when the build passes.
+name: Linux
+
+on:
+  push:
+    branches: [main]
+    # Work in progress is checked under check-* tags, so main stays the only
+    # branch; zephium-linux installs only pushes to main.
+    tags: ["check-*"]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'schedule' && github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    # Arch, like the machines the port is installed on, so the build sees the
+    # same webkit2gtk-4.1 they run.
+    container:
+      image: archlinux:base-devel
+      # WebKit's own sandbox (bubblewrap) needs user namespaces, which
+      # Docker's default seccomp and AppArmor profiles refuse in a container.
+      options: --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+      volumes:
+        - /usr/share/dotnet:/host/dotnet
+        - /usr/local/lib/android:/host/android
+        - /opt/hostedtoolcache:/host/toolcache
+    env:
+      CATCHING_UP: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - name: System packages
+        run: |
+          pacman -Syu --noconfirm --needed git rustup jq curl wget file openssl \
+            webkit2gtk-4.1 gtk3 libsoup3 librsvg libappindicator-gtk3 appmenu-gtk-module \
+            xorg-server-xvfb dbus
+
+      # Pushing a commit that touches .github/workflows needs a token with the
+      # workflow scope, which the built-in token cannot have.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ env.CATCHING_UP == 'true' && secrets.SYNC_TOKEN || github.token }}
+
+      # The container runs as root over a checkout the runner owns.
+      - name: Trust the checkout
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Catch up with upstream
+        id: catch-up
+        if: env.CATCHING_UP == 'true'
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
+        run: |
+          if [ "$HAS_SYNC_TOKEN" != true ]; then
+            echo "::error::Add a SYNC_TOKEN secret (fine-grained token for this repository: Contents and Workflows read/write) so the catch-up can push."
+            exit 1
+          fi
+          linux/tools/ci/catch-up.sh >> "$GITHUB_OUTPUT"
+
+      - name: Make room on the runner
+        if: steps.catch-up.outputs.changed != 'false'
+        run: rm -rf /host/dotnet/* /host/android/* /host/toolcache/*
+
+      - name: Rust toolchain from rust-toolchain.toml
+        if: steps.catch-up.outputs.changed != 'false'
+        run: rustup toolchain install
+
+      - uses: actions/setup-node@v4
+        if: steps.catch-up.outputs.changed != 'false'
+        with:
+          node-version-file: .node-version
+
+      - name: pnpm pinned by package.json
+        if: steps.catch-up.outputs.changed != 'false'
+        run: npm install --global "pnpm@$(jq -r '.packageManager | split("@")[1]' package.json)"
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.catch-up.outputs.changed != 'false'
+
+      - name: Upstream's architecture guards
+        if: steps.catch-up.outputs.changed != 'false'
+        run: cargo test -p xtask
+
+      # Unit tests of the extension crates, then the channel's end-to-end probe
+      # in a sandboxed WebKitGTK on a virtual display.
+      - name: Extension tests
+        if: steps.catch-up.outputs.changed != 'false'
+        run: |
+          cargo test -p zephium-webext -p zephium-webext-process
+          cargo build -p zephium-webext-process --lib --example channel_probe
+          plugin=$(mktemp -d)
+          cp target/debug/libzephium_webext_process.so "$plugin/"
+          GDK_BACKEND=x11 xvfb-run -a dbus-run-session -- target/debug/examples/channel_probe "$plugin"
+
+      - name: Frontend dependencies
+        if: steps.catch-up.outputs.changed != 'false'
+        run: pnpm install --frozen-lockfile
+
+      - name: Build the .deb (release profile)
+        if: steps.catch-up.outputs.changed != 'false'
+        env:
+          CI: "true"
+        run: pnpm -C desktop build --bundles deb
+
+      - uses: actions/upload-artifact@v4
+        if: steps.catch-up.outputs.changed != 'false'
+        with:
+          name: zephium-linux-deb
+          path: target/release/bundle/deb/*.deb
+          if-no-files-found: error
+
+      # The lease refuses the push if main moved while this built, e.g. because
+      # zephium-linux published a repaired series meanwhile.
+      - name: Publish the caught-up main
+        if: steps.catch-up.outputs.changed == 'true'
+        run: git push --force-with-lease=main:${{ github.sha }} origin HEAD:refs/heads/main
