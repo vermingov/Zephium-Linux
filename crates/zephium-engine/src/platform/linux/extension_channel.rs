@@ -18,7 +18,9 @@ use std::rc::Rc;
 use gtk::glib::prelude::ObjectExt;
 use gtk::glib::ToVariant;
 use webkit2gtk::{UserMessage, UserMessageExt, WebContext, WebContextExt, WebView, WebViewExt};
-use zephium_webext_process::{InitGroup, EVENT_MESSAGE, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
+use zephium_webext_process::{
+    InitGroup, CONFIG_MESSAGE, CONFIG_REQUEST, EVENT_MESSAGE, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE,
+};
 
 const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 /// Bytes one message may carry. The plugin refuses larger ones in the web
@@ -95,7 +97,8 @@ impl Channel {
         *self.handler.borrow_mut() = Some(Rc::new(handler));
     }
 
-    fn init_data(&self) -> gtk::glib::Variant {
+    /// The enabled extensions as the plugin takes them, at startup or later.
+    pub(crate) fn current_data(&self) -> gtk::glib::Variant {
         let extensions: Vec<zephium_webext_process::InitExtension> =
             self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
@@ -139,7 +142,7 @@ pub(crate) fn attach(context: &WebContext) -> Option<Rc<Channel>> {
     let channel = Rc::new(Channel::default());
     let starting = channel.clone();
     context.connect_initialize_web_extensions(move |context| {
-        context.set_web_extensions_initialization_user_data(&starting.init_data());
+        context.set_web_extensions_initialization_user_data(&starting.current_data());
     });
     // SAFETY: this private key is written and read only as `Rc<Channel>`
     // here, and lives exactly as long as the context GLib object.
@@ -155,6 +158,11 @@ pub(crate) fn channel(context: &WebContext) -> Option<Rc<Channel>> {
 /// Deliver messages the plugin sends from `view`'s pages to `channel`.
 pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
     view.connect_user_message_received(move |view, message| {
+        // A process WebKit started earlier asks for the current list.
+        if message.name().as_deref() == Some(CONFIG_REQUEST) {
+            message.send_reply(&UserMessage::new(CONFIG_REQUEST, Some(&channel.current_data())));
+            return true;
+        }
         if message.name().as_deref() != Some(SEND_MESSAGE) {
             return false;
         }
@@ -184,6 +192,12 @@ pub(crate) fn raise(view: &WebView, extension_id: &str, frame_id: u64, body: &st
             .map_or(0, |(count,)| count);
         counted(count);
     });
+}
+
+/// Give `view`'s page the current enabled extensions.
+pub(crate) fn configure_page(view: &WebView, data: &gtk::glib::Variant) {
+    let message = UserMessage::new(CONFIG_MESSAGE, Some(data));
+    view.send_message_to_page(&message, None::<&gtk::gio::Cancellable>, |_| {});
 }
 
 /// `<binary>/../lib/app.zephium/webext` as packaged, or `<binary>/webext` in a

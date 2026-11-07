@@ -12,7 +12,7 @@ use std::ffi::{c_void, CStr, CString};
 use glib::gobject_ffi::{g_object_unref, g_signal_connect_data};
 
 use crate::channel::{self, Sender};
-use crate::events;
+use crate::{config, events};
 use crate::ffi::*;
 use crate::matching::any_matches;
 use crate::plugin::{is_extension_id, Group, RunAt, PLUGIN};
@@ -82,12 +82,18 @@ unsafe extern "C" fn main_world_cleared(
 
     if let Some(rest) = EXTENSION_SCHEMES.iter().find_map(|scheme| uri.strip_prefix(scheme)) {
         let host = rest.split('/').next().unwrap_or_default();
-        if let Some(info) = info_of(host) {
-            let context = webkit_frame_get_js_context_for_script_world(frame, main_world);
-            if !context.is_null() {
-                channel::install(context, Sender::new(host, KIND_PAGE, page_id, frame_id), &info, KIND_PAGE);
-                g_object_unref(context.cast());
+        match info_of(host) {
+            Some(info) => {
+                let context = webkit_frame_get_js_context_for_script_world(frame, main_world);
+                if !context.is_null() {
+                    channel::install(context, Sender::new(host, KIND_PAGE, page_id, frame_id), &info, KIND_PAGE);
+                    g_object_unref(context.cast());
+                }
             }
+            // This process may predate the extension: ask, and reload the
+            // page here once if it turns out to be enabled.
+            None if is_extension_id(host) && ok(webkit_frame_is_main_frame(frame)) => config::request(page, true),
+            None => {}
         }
         return;
     }

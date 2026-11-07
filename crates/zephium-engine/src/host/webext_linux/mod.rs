@@ -231,6 +231,7 @@ impl super::EngineHost {
     /// Bring the plugin's startup data, the served packages, the background
     /// views and the navigation grants in line with the loaded installs.
     fn linux_extensions_sync(&mut self, profile: ProfileId) {
+        let tab_views = self.linux_tab_views(profile);
         let Some(state) = self.linux_extensions.profiles.get_mut(&profile) else {
             return;
         };
@@ -243,6 +244,12 @@ impl super::EngineHost {
         }
         if let Some(channel) = &state.channel {
             channel.set_extensions(state.installs.values().map(|install| install.channel.clone()).collect());
+            // Processes already running learn the change now; new ones ask.
+            let data = channel.current_data();
+            let own = state.installs.values().flat_map(Install::own_views);
+            for view in tab_views.iter().cloned().chain(own) {
+                extension_channel::configure_page(&view, &data);
+            }
         }
         if let (Some(context), Some(channel)) = (&state.context, &state.channel) {
             for install in state.installs.values_mut().filter(|install| install.background.is_none()) {

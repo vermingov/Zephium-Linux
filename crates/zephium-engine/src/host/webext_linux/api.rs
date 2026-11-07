@@ -503,7 +503,7 @@ impl super::super::EngineHost {
     }
 
     /// Every view of the profile's tabs, for events every context gets.
-    fn linux_tab_views(&self, profile: ProfileId) -> Vec<WebView> {
+    pub(super) fn linux_tab_views(&self, profile: ProfileId) -> Vec<WebView> {
         use wry::WebViewExtUnix;
         self.views
             .iter()

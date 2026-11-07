@@ -17,7 +17,7 @@ use glib::ToVariant;
 
 use crate::channel;
 use crate::ffi::*;
-use crate::{run, EVENT_MESSAGE, RUN_MESSAGE};
+use crate::{config, run, CONFIG_MESSAGE, EVENT_MESSAGE, RUN_MESSAGE};
 
 /// The world a listener belongs to.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -73,6 +73,8 @@ pub(crate) unsafe fn watch_pages(extension: *mut WebKitWebExtension) {
 }
 
 unsafe extern "C" fn page_created(_extension: *mut WebKitWebExtension, page: *mut WebKitWebPage, _data: *mut c_void) {
+    // The process may have started before the enabled extensions changed.
+    config::request(page, false);
     g_signal_connect_data(
         page.cast(),
         c"user-message-received".as_ptr(),
@@ -95,6 +97,10 @@ unsafe extern "C" fn message_received(
     let name = if name.is_null() { None } else { CStr::from_ptr(name).to_str().ok() };
     if name == Some(RUN_MESSAGE) {
         run::run(page, message);
+        return 1;
+    }
+    if name == Some(CONFIG_MESSAGE) {
+        config::apply(message);
         return 1;
     }
     if name != Some(EVENT_MESSAGE) {

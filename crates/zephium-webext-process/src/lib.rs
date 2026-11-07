@@ -14,6 +14,8 @@
 #[cfg(all(unix, not(target_os = "macos")))]
 mod channel;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod config;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod events;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod ffi;
@@ -34,6 +36,12 @@ pub const EVENT_MESSAGE: &str = "zephium-webext.event";
 /// extension's world of its main frame. Parameters `(ss)`: extension ID,
 /// code. The reply's `(s)` is JSON: `{"ok": result}` or `{"error": message}`.
 pub const RUN_MESSAGE: &str = "zephium-webext.run";
+/// Name of the message the browser sends a page with the current enabled
+/// extensions, `INIT_DATA_TYPE`, whenever they change.
+pub const CONFIG_MESSAGE: &str = "zephium-webext.config";
+/// Name of the message a page sends the browser to ask for the current
+/// enabled extensions; the reply carries them as `INIT_DATA_TYPE`.
+pub const CONFIG_REQUEST: &str = "zephium-webext.config-request";
 /// Sender kind of a content script's isolated world.
 pub const KIND_CONTENT: &str = "content";
 /// Sender kind of an extension's own page (background, popup, options).
@@ -104,36 +112,51 @@ mod plugin {
         pub(crate) static PLUGIN: RefCell<Option<Plugin>> = const { RefCell::new(None) };
     }
 
-    /// Entry point WebKitGTK calls once per web process.
+    /// Entry point WebKitGTK calls once per web process. The startup data may
+    /// be stale (WebKit starts spare processes ahead of need), so the plugin
+    /// also takes the current list later: see `configure`.
     #[no_mangle]
     pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
         extension: *mut WebKitWebExtension,
         user_data: *const glib::ffi::GVariant,
     ) {
-        if user_data.is_null() {
-            return;
-        }
-        let data = glib::Variant::from_glib_none(user_data);
-        if data.type_().as_str() != INIT_DATA_TYPE {
-            return;
-        }
-        let Some((limit, enabled)) = data.get::<(u32, Vec<InitExtension>)>() else {
-            return;
-        };
-        let extensions = enabled
-            .into_iter()
-            .filter(|(id, _, _, _)| is_extension_id(id))
-            .map(|(id, info, granted, groups)| {
-                let world = worlds::World::new(&id);
-                let groups = groups.into_iter().map(group).collect();
-                (id, Extension { info, granted, groups, world })
-            })
-            .collect();
         PLUGIN.with(|plugin| {
-            *plugin.borrow_mut() = Some(Plugin { extension, message_limit: limit as usize, extensions });
+            *plugin.borrow_mut() = Some(Plugin { extension, message_limit: 0, extensions: HashMap::new() });
         });
+        if !user_data.is_null() {
+            configure(&glib::Variant::from_glib_none(user_data));
+        }
         worlds::watch_main_world();
         events::watch_pages(extension);
+    }
+
+    /// Take `data` (`INIT_DATA_TYPE`) as the enabled extensions. An extension
+    /// already known keeps its world, so scripts running in it are untouched.
+    pub(crate) fn configure(data: &glib::Variant) -> bool {
+        if data.type_().as_str() != INIT_DATA_TYPE {
+            return false;
+        }
+        let Some((limit, enabled)) = data.get::<(u32, Vec<InitExtension>)>() else {
+            return false;
+        };
+        PLUGIN.with(|plugin| {
+            let mut plugin = plugin.borrow_mut();
+            let Some(plugin) = plugin.as_mut() else {
+                return false;
+            };
+            let mut previous = std::mem::take(&mut plugin.extensions);
+            plugin.extensions = enabled
+                .into_iter()
+                .filter(|(id, _, _, _)| is_extension_id(id))
+                .map(|(id, info, granted, groups)| {
+                    let world = previous.remove(&id).map_or_else(|| worlds::World::new(&id), |known| known.world);
+                    let groups = groups.into_iter().map(group).collect();
+                    (id, Extension { info, granted, groups, world })
+                })
+                .collect();
+            plugin.message_limit = limit as usize;
+            true
+        })
     }
 
     fn group((matches, exclude_matches, scripts, run_at, all_frames): crate::InitGroup) -> Group {
