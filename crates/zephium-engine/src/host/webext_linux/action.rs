@@ -27,12 +27,12 @@ const POPUP_SIZE: (i32, i32) = (380, 520);
 /// Chrome's bounds for a popup sized to its page.
 const POPUP_MIN: i32 = 25;
 const POPUP_MAX: (i32, i32) = (800, 600);
-/// The page's preferred size, as Chrome sizes a popup: its width when
-/// nothing stretches it, and its height at that width.
+/// The page's preferred size, as Chrome sizes a popup: its widest line,
+/// whatever the window's width now, and its height at that width.
 const MEASURE_POPUP: &str = r#"(() => {
   const root = document.documentElement;
   const saved = root.style.width;
-  root.style.width = "fit-content";
+  root.style.width = "max-content";
   // The root's own box: scrollHeight never drops below the window's height.
   const box = root.getBoundingClientRect();
   const size = `${Math.ceil(box.width)},${Math.ceil(box.height)}`;
