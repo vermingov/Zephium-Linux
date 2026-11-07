@@ -28,6 +28,7 @@ unsafe extern "C" {
     pub fn webkit_script_world_new_with_name(name: *const c_char) -> *mut WebKitScriptWorld;
 
     pub fn webkit_frame_get_id(frame: *mut WebKitFrame) -> u64;
+    pub fn webkit_frame_is_main_frame(frame: *mut WebKitFrame) -> gboolean;
     pub fn webkit_frame_get_uri(frame: *mut WebKitFrame) -> *const c_char;
     pub fn webkit_frame_get_js_context_for_script_world(
         frame: *mut WebKitFrame,
@@ -50,6 +51,7 @@ unsafe extern "C" {
 
     pub fn webkit_user_message_new(name: *const c_char, parameters: *mut GVariant) -> *mut WebKitUserMessage;
     pub fn webkit_user_message_get_parameters(message: *mut WebKitUserMessage) -> *mut GVariant;
+    pub fn webkit_user_message_get_name(message: *mut WebKitUserMessage) -> *const c_char;
 }
 
 #[link(name = "javascriptcoregtk-4.1")]

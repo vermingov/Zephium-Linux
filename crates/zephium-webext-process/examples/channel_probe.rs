@@ -2,8 +2,8 @@
 //!
 //!   channel_probe <directory holding only libzephium_webext_process.so>
 //!
-//! Needs a display (run it in the port's tools/rig). Prints one PASS or FAIL
-//! line per claim in docs/extensions.md and exits non-zero on any FAIL.
+//! Needs a display (the port's tools/rig, or xvfb-run). Prints one PASS or
+//! FAIL line per claim in docs/extensions.md and exits non-zero on any FAIL.
 
 #[cfg(not(all(unix, not(target_os = "macos"))))]
 fn main() {}
@@ -27,17 +27,18 @@ mod probe {
         SecurityManagerExt, URISchemeRequestExt, UserMessage, UserMessageExt, WebContext, WebContextExt,
         WebView, WebViewExt,
     };
-    use zephium_webext_process::{KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
+    use zephium_webext_process::{InitExtension, EVENT_MESSAGE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
 
     const ENABLED: &str = "abcdefghijklmnopabcdefghijklmnop";
     const DISABLED: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
     const LIMIT: u32 = 64 * 1024;
 
     const EXTENSION_PAGE: &str = r#"<!doctype html><script>
+        __zephiumWebextSend("page-info:" + __zephiumWebextContext, () => {});
         __zephiumWebextSend("from-page", answer => __zephiumWebextSend("page-got:" + answer, () => {}));
     </script>"#;
 
-    const CONTENT_SCRIPT: &str = r#"(() => {
+    const CONTENT_START: &str = r#"(() => {
         let big = "sent", wrong = "sent", kept = "kept";
         try { __zephiumWebextSend("x".repeat(70000), () => {}); } catch (e) { big = "threw"; }
         try { __zephiumWebextSend({}, () => {}); } catch (e) { wrong = "threw"; }
@@ -45,27 +46,45 @@ mod probe {
         if (typeof __zephiumWebextSend !== "function") kept = "replaced";
         const report = ["from-content", big, wrong, kept].join("|");
         __zephiumWebextSend(report, answer => __zephiumWebextSend("content-got:" + answer, () => {}));
+        __zephiumWebextSend("info:" + JSON.parse(__zephiumWebextInfo).id + ":" + __zephiumWebextContext, () => {});
+        __zephiumWebextListen(text => __zephiumWebextSend("event:" + text, () => {}));
     })();"#;
 
-    const WEB_PAGE: &str = r#"<!doctype html><title>t</title><script>
+    const CONTENT_END: &str = r#"__zephiumWebextSend("end:" + (document.body ? "body" : "nobody"), () => {});"#;
+    const CONTENT_EXCLUDED: &str = r#"__zephiumWebextSend("excluded-ran", () => {});"#;
+
+    const WEB_PAGE: &str = r#"<!doctype html><title>t</title><body><script>
         document.title = "pageworld:" + typeof window.__zephiumWebextSend;
-    </script>"#;
+    </script></body>"#;
 
     type Received = Rc<RefCell<Vec<(String, String, String)>>>;
 
+    fn extensions() -> Vec<InitExtension> {
+        let page = |pattern: &str| vec![pattern.to_owned()];
+        let group = |matches: Vec<String>, excludes: Vec<String>, script: &str, run_at: &str| {
+            (matches, excludes, vec![script.to_owned()], run_at.to_owned(), false)
+        };
+        let content = "file:///*/content.html";
+        vec![(
+            ENABLED.to_owned(),
+            format!(r#"{{"id":"{ENABLED}"}}"#),
+            vec![
+                group(page(content), vec![], CONTENT_START, "document_start"),
+                group(page(content), vec![], CONTENT_END, "document_end"),
+                group(page(content), page(content), CONTENT_EXCLUDED, "document_start"),
+            ],
+        )]
+    }
+
     pub fn run() {
         let plugin_dir = std::env::args().nth(1).expect("usage: channel_probe <plugin directory>");
-        gtk::init().expect("a display (run inside tools/rig)");
+        gtk::init().expect("a display (run inside tools/rig or xvfb-run)");
         let pages = write_pages();
 
         let context = WebContext::new();
         context.set_sandbox_enabled(true);
         context.set_web_extensions_directory(&plugin_dir);
-        let init = (
-            LIMIT,
-            vec![(ENABLED.to_owned(), vec!["file:///*/content.html".to_owned()], vec![CONTENT_SCRIPT.to_owned()])],
-        )
-            .to_variant();
+        let init = (LIMIT, extensions()).to_variant();
         assert_eq!(init.type_().as_str(), zephium_webext_process::INIT_DATA_TYPE);
         context.connect_initialize_web_extensions(move |context| {
             context.set_web_extensions_initialization_user_data(&init);
@@ -108,18 +127,32 @@ mod probe {
         };
 
         view.load_uri(&format!("chrome-extension://{ENABLED}/page.html"));
-        let page_ok = wait(|| has(&received, KIND_PAGE, "page-got:ok:from-page"));
-        check("an enabled extension's page sends and gets its reply", page_ok);
+        check("an enabled extension's page sends and gets its reply", wait(|| has(&received, KIND_PAGE, "page-got:ok:from-page")));
+        check("an extension page is told it is a page", has(&received, KIND_PAGE, "page-info:page"));
 
         view.load_uri(&file_uri(&pages.join("content.html")));
         let report = "from-content|threw|threw|kept";
-        let content_ok = wait(|| has(&received, KIND_CONTENT, &format!("content-got:ok:{report}")));
-        check("a matching page runs the content script, which sends and gets its reply", content_ok);
+        check(
+            "a matching page runs the content script, which sends and gets its reply",
+            wait(|| has(&received, KIND_CONTENT, &format!("content-got:ok:{report}"))),
+        );
         check("an oversized message is refused in the web process", has(&received, KIND_CONTENT, report));
         check("a non-string message is refused", has(&received, KIND_CONTENT, report));
         check("content-script code cannot replace the send function", has(&received, KIND_CONTENT, report));
-        let page_world = wait(|| view.title().as_deref() == Some("pageworld:undefined"));
-        check("the page's own scripts cannot see the send function", page_world);
+        check(
+            "a content script reads its extension's info and is told it is content",
+            has(&received, KIND_CONTENT, &format!("info:{ENABLED}:content")),
+        );
+        check("document_end scripts run once the body is parsed", wait(|| has(&received, KIND_CONTENT, "end:body")));
+        check("exclude_matches keeps a group out", !has(&received, KIND_CONTENT, "excluded-ran"));
+        check(
+            "the page's own scripts cannot see the send function",
+            wait(|| view.title().as_deref() == Some("pageworld:undefined")),
+        );
+
+        let event = UserMessage::new(EVENT_MESSAGE, Some(&(ENABLED, 0u64, "ping").to_variant()));
+        view.send_message_to_page(&event, None::<&gio::Cancellable>, |_| {});
+        check("an event from the browser reaches the content script's listener", wait(|| has(&received, KIND_CONTENT, "event:ping")));
         check("every message carried the enabled extension's ID", received.borrow().iter().all(|(id, ..)| id == ENABLED));
 
         let before = received.borrow().len();

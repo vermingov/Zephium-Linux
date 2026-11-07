@@ -10,8 +10,8 @@
 //   __zephiumWebextListen(listener)    the world's one event listener
 //
 // and the plugin's read-only `__zephiumWebextInfo` (JSON: the extension's ID,
-// base URL, manifest, resolved messages and this context's kind). The protocol
-// is in the Linux port's docs/extensions.md.
+// base URL, manifest and resolved messages) and `__zephiumWebextContext`
+// ("page" or "content"). The protocol is in the Linux port's docs/extensions.md.
 (() => {
   "use strict";
 
@@ -21,7 +21,7 @@
   if (globalThis.chrome && globalThis.chrome.runtime && globalThis.chrome.runtime.id) return;
 
   const info = JSON.parse(globalThis.__zephiumWebextInfo);
-  const isContentScript = info.context === "content";
+  const isContentScript = globalThis.__zephiumWebextContext === "content";
 
   // ---- Requests -------------------------------------------------------------
 

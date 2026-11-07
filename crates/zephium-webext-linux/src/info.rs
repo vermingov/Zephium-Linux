@@ -1,6 +1,7 @@
-//! What an extension context is told when it starts, read synchronously by
-//! the API layer: `runtime.id`, `runtime.getURL`, `runtime.getManifest` and
-//! `i18n.getMessage` answer without a round trip to the browser.
+//! What an extension's contexts are told when they start, read synchronously
+//! by the API layer: `runtime.id`, `runtime.getURL`, `runtime.getManifest` and
+//! `i18n.getMessage` answer without a round trip to the browser. The same block
+//! serves pages and content scripts; the plugin tells each which it is.
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -9,21 +10,11 @@ use std::path::Path;
 use serde_json::{json, Map, Value};
 use zephium_webext::manifest::Manifest;
 
-/// Where the context runs.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Context {
-    /// The extension's own pages: background, popup, options.
-    Page,
-    /// A content script, in the extension's world of a web page.
-    Content,
-}
-
 /// The JSON the plugin exposes as `__zephiumWebextInfo`.
-pub fn info(id: &str, base_url: &str, context: Context, package: &Path, manifest: &Manifest) -> String {
+pub fn info(id: &str, base_url: &str, package: &Path, manifest: &Manifest) -> String {
     json!({
         "id": id,
         "baseUrl": base_url,
-        "context": match context { Context::Page => "page", Context::Content => "content" },
         "manifest": manifest.raw(),
         "messages": messages(package, manifest),
         "uiLanguage": "en",
@@ -82,10 +73,9 @@ mod tests {
             ("_locales/en/messages.json", r#"{"appName": {"message": "Reader"}, "Greeting": {"message": "Hi"}}"#),
         ]);
         let manifest = Manifest::load(dir.path()).unwrap();
-        let info: Value = serde_json::from_str(&info("a", "chrome-extension://a/", Context::Page, dir.path(), &manifest)).unwrap();
+        let info: Value = serde_json::from_str(&info("a", "chrome-extension://a/", dir.path(), &manifest)).unwrap();
         assert_eq!(info["messages"]["appname"], "Reader");
         assert_eq!(info["messages"]["greeting"], "Hi");
-        assert_eq!(info["context"], "page");
         assert_eq!(info["manifest"]["name"], "__MSG_appName__");
     }
 
@@ -93,8 +83,8 @@ mod tests {
     fn a_package_without_locales_has_no_messages() {
         let dir = package(&[("manifest.json", r#"{"manifest_version": 3, "name": "x"}"#)]);
         let manifest = Manifest::load(dir.path()).unwrap();
-        let info: Value = serde_json::from_str(&info("a", "chrome-extension://a/", Context::Content, dir.path(), &manifest)).unwrap();
+        let info: Value = serde_json::from_str(&info("a", "chrome-extension://a/", dir.path(), &manifest)).unwrap();
         assert_eq!(info["messages"], json!({}));
-        assert_eq!(info["context"], "content");
+        assert_eq!(info["baseUrl"], "chrome-extension://a/");
     }
 }

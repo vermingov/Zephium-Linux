@@ -1,5 +1,6 @@
-//! The one native function an extension world gets: it sends a bounded
-//! string to the browser and hands the reply to a callback.
+//! The globals an extension context gets, and the one way out of it: a
+//! function that sends a bounded string to the browser and hands the reply to
+//! a callback.
 //!
 //! The size is checked here, in the web process, so the browser never
 //! receives more than the limit. Measuring copies a string the caller already
@@ -12,9 +13,10 @@ use glib::gobject_ffi::{g_object_ref, g_object_unref};
 use glib::translate::{FromGlibPtrNone, ToGlibPtr};
 use glib::ToVariant;
 
+use crate::events::{self, Key};
 use crate::ffi::*;
 use crate::plugin::PLUGIN;
-use crate::{SEND_FUNCTION, SEND_MESSAGE};
+use crate::{CONTEXT_GLOBAL, INFO_GLOBAL, LISTEN_FUNCTION, SEND_FUNCTION, SEND_MESSAGE};
 
 /// Who is sending, fixed by the plugin when it installs the function.
 pub(crate) struct Sender {
@@ -30,28 +32,56 @@ impl Sender {
     }
 }
 
-/// Define the send function on `context`'s global object, read-only and
-/// non-configurable, so code in the world can call it but not replace it.
-pub(crate) unsafe fn install(context: *mut JSCContext, sender: Sender) {
-    let name = CString::new(SEND_FUNCTION).expect("constant has no NUL");
+/// Give `context` its send and listen functions, the extension's info block
+/// and its kind. Everything is read-only and non-configurable, so code in the
+/// world can use it but not replace it.
+pub(crate) unsafe fn install(context: *mut JSCContext, sender: Sender, info: &str, kind: &str) {
+    let key = Key { page_id: sender.page_id, frame_id: sender.frame_id, extension_id: sender.extension_id.clone() };
+    define_function(context, SEND_FUNCTION, send, Box::into_raw(Box::new(sender)).cast(), drop_box::<Sender>);
+    define_function(context, LISTEN_FUNCTION, listen, Box::into_raw(Box::new(key)).cast(), drop_box::<Key>);
+    define_string(context, INFO_GLOBAL, info);
+    define_string(context, CONTEXT_GLOBAL, kind);
+}
+
+pub(crate) type Variadic = unsafe extern "C" fn(*mut glib::ffi::GPtrArray, *mut c_void);
+
+/// A native function on `context`'s global object that owns `data`.
+pub(crate) unsafe fn define_function(
+    context: *mut JSCContext,
+    name: &str,
+    callback: Variadic,
+    data: *mut c_void,
+    drop_data: unsafe extern "C" fn(*mut c_void),
+) {
+    let name = CString::new(name).expect("constant has no NUL");
     let function = jsc_value_new_function_variadic(
         context,
         name.as_ptr(),
-        Some(std::mem::transmute::<unsafe extern "C" fn(*mut glib::ffi::GPtrArray, *mut c_void), unsafe extern "C" fn()>(
-            send,
-        )),
-        Box::into_raw(Box::new(sender)).cast(),
-        Some(drop_sender),
+        Some(std::mem::transmute::<Variadic, unsafe extern "C" fn()>(callback)),
+        data,
+        Some(drop_data),
         glib::gobject_ffi::G_TYPE_NONE,
     );
-    let global = jsc_context_get_global_object(context);
-    jsc_value_object_define_property_data(global, name.as_ptr(), JSC_VALUE_PROPERTY_NONE, function);
-    g_object_unref(global.cast());
-    g_object_unref(function.cast());
+    define(context, &name, function);
 }
 
-unsafe extern "C" fn drop_sender(data: *mut c_void) {
-    drop(Box::from_raw(data.cast::<Sender>()));
+unsafe fn define_string(context: *mut JSCContext, name: &str, text: &str) {
+    let (Ok(name), Ok(text)) = (CString::new(name), CString::new(text)) else {
+        return;
+    };
+    define(context, &name, jsc_value_new_string(context, text.as_ptr()));
+}
+
+/// Define `value` on the global object and release this function's reference.
+unsafe fn define(context: *mut JSCContext, name: &CStr, value: *mut JSCValue) {
+    let global = jsc_context_get_global_object(context);
+    jsc_value_object_define_property_data(global, name.as_ptr(), JSC_VALUE_PROPERTY_NONE, value);
+    g_object_unref(global.cast());
+    g_object_unref(value.cast());
+}
+
+unsafe extern "C" fn drop_box<T>(data: *mut c_void) {
+    drop(Box::from_raw(data.cast::<T>()));
 }
 
 /// `send(message: string, reply: (answer?: string) => void)`.
@@ -65,7 +95,7 @@ unsafe extern "C" fn send(args: *mut glib::ffi::GPtrArray, data: *mut c_void) {
         throw(context, c"send(message, reply) takes a string and a function");
         return;
     }
-    let Some(body) = owned_string(jsc_value_to_string(*message)) else {
+    let Some(body) = string_of(*message) else {
         throw(context, c"the message is not valid UTF-8");
         return;
     };
@@ -96,22 +126,49 @@ unsafe extern "C" fn replied(page: *mut c_void, result: *mut GAsyncResult, data:
         .then(|| glib::Variant::from_glib_none(parameters))
         .and_then(|parameters| parameters.get::<(String,)>())
         .map(|(text,)| text);
-    let context = jsc_value_get_context(reply);
+    call_with(reply, text.as_deref());
+    if !answer.is_null() {
+        g_object_unref(answer.cast());
+    }
+    g_object_unref(reply.cast());
+}
+
+/// `listen(listener: (event: string) => void)`: the world's one listener for
+/// events the browser raises; a second call replaces the first.
+unsafe extern "C" fn listen(args: *mut glib::ffi::GPtrArray, data: *mut c_void) {
+    let key = &*data.cast::<Key>();
+    let [listener] = arguments(args) else {
+        return;
+    };
+    if !ok(jsc_value_is_function(*listener)) {
+        throw(jsc_value_get_context(*listener), c"listen(listener) takes a function");
+        return;
+    }
+    events::register(key.clone(), *listener);
+}
+
+/// Call `function` with `text` as its one argument, or with none.
+pub(crate) unsafe fn call_with(function: *mut JSCValue, text: Option<&str>) {
+    let context = jsc_value_get_context(function);
     let mut arguments: Vec<*mut JSCValue> = Vec::new();
     if let Some(text) = text.and_then(|text| CString::new(text).ok()) {
         arguments.push(jsc_value_new_string(context, text.as_ptr()));
     }
-    let returned = jsc_value_function_callv(reply, arguments.len() as u32, arguments.as_mut_ptr());
+    let returned = jsc_value_function_callv(function, arguments.len() as u32, arguments.as_mut_ptr());
     for argument in arguments {
         g_object_unref(argument.cast());
     }
     if !returned.is_null() {
         g_object_unref(returned.cast());
     }
-    if !answer.is_null() {
-        g_object_unref(answer.cast());
+}
+
+/// A JavaScript string value as Rust text, if it is a string.
+pub(crate) unsafe fn string_of(value: *mut JSCValue) -> Option<String> {
+    if !ok(jsc_value_is_string(value)) {
+        return None;
     }
-    g_object_unref(reply.cast());
+    owned_string(jsc_value_to_string(value))
 }
 
 unsafe fn throw(context: *mut JSCContext, message: &CStr) {

@@ -18,7 +18,7 @@ use std::rc::Rc;
 use gtk::glib::prelude::ObjectExt;
 use gtk::glib::ToVariant;
 use webkit2gtk::{UserMessage, UserMessageExt, WebContext, WebContextExt, WebView, WebViewExt};
-use zephium_webext_process::{INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
+use zephium_webext_process::{InitGroup, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
 
 const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 /// Bytes one message may carry. The plugin refuses larger ones in the web
@@ -28,12 +28,14 @@ const CHANNEL_KEY: &str = "zephium-extension-channel";
 
 type Handler = Rc<dyn Fn(Message)>;
 
-/// What the plugin needs of one enabled extension.
+/// What the plugin needs of one enabled extension: its ID, the info block
+/// its contexts start with (`zephium_webext_linux::info`), and its content
+/// scripts (`zephium_webext_linux::content`).
 #[derive(Clone, Debug)]
 pub(crate) struct ChannelExtension {
     pub(crate) id: String,
-    pub(crate) content_matches: Vec<String>,
-    pub(crate) content_scripts: Vec<String>,
+    pub(crate) info: String,
+    pub(crate) groups: Vec<InitGroup>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -90,12 +92,8 @@ impl Channel {
     }
 
     fn init_data(&self) -> gtk::glib::Variant {
-        let extensions: Vec<(String, Vec<String>, Vec<String>)> = self
-            .extensions
-            .borrow()
-            .iter()
-            .map(|e| (e.id.clone(), e.content_matches.clone(), e.content_scripts.clone()))
-            .collect();
+        let extensions: Vec<zephium_webext_process::InitExtension> =
+            self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.groups.clone())).collect();
         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
         data
