@@ -14,7 +14,7 @@ use glib::gobject_ffi::{g_object_unref, g_signal_connect_data};
 use crate::channel::{self, Sender};
 use crate::{config, events};
 use crate::ffi::*;
-use crate::matching::any_matches;
+use crate::matching::{any_matches, is_restricted};
 use crate::plugin::{is_extension_id, Group, RunAt, PLUGIN};
 use crate::{EXTENSION_SCHEMES, KIND_CONTENT, KIND_PAGE};
 
@@ -101,6 +101,9 @@ unsafe extern "C" fn main_world_cleared(
         return;
     }
 
+    if is_restricted(uri) {
+        return;
+    }
     let main_frame = ok(webkit_frame_is_main_frame(frame));
     // Copied out first: a content script may call back into the plugin.
     let matching: Vec<(String, *mut WebKitScriptWorld, String, Vec<Group>)> = PLUGIN.with(|plugin| {

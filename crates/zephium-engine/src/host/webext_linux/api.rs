@@ -16,7 +16,7 @@ use zephium_core::extensions::{
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 use zephium_webext_linux::storage::{Area, Changes, LOCAL_QUOTA};
-use zephium_webext_process::matching::any_matches;
+use zephium_webext_process::matching::{any_matches, is_restricted};
 
 use super::routing::{error, ok, raise, Endpoint};
 use crate::platform::imp::extension_channel::{Message, SenderKind};
@@ -162,6 +162,9 @@ impl super::super::EngineHost {
         };
         let url = view.uri().map(|uri| uri.to_string()).unwrap_or_default();
         let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
+        if is_restricted(&url) {
+            return Err("The extensions gallery cannot be scripted.".into());
+        }
         let allowed = install.active_tabs.contains(&item) || any_matches(&install.hosts, &url);
         if !allowed {
             return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());

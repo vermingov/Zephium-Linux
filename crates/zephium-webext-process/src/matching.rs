@@ -9,6 +9,21 @@ pub fn any_matches(patterns: &[String], url: &str) -> bool {
     patterns.iter().any(|pattern| matches(pattern, &target))
 }
 
+/// Pages no extension may script, whatever it was granted: the add-on
+/// stores, as Chrome keeps extensions off its Web Store and Firefox off
+/// addons.mozilla.org. An extension there could install others.
+pub fn is_restricted(url: &str) -> bool {
+    let Some(target) = Target::parse(url) else {
+        return false;
+    };
+    target.scheme == "https"
+        && match target.host.to_ascii_lowercase().as_str() {
+            "chromewebstore.google.com" | "addons.mozilla.org" => true,
+            "chrome.google.com" => target.path.starts_with("/webstore"),
+            _ => false,
+        }
+}
+
 struct Target<'a> {
     scheme: &'a str,
     host: &'a str,
@@ -91,7 +106,16 @@ fn glob(pattern: &str, text: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::any_matches;
+    use super::{any_matches, is_restricted};
+
+    #[test]
+    fn the_add_on_stores_are_off_limits() {
+        assert!(is_restricted("https://chromewebstore.google.com/detail/x/abc"));
+        assert!(is_restricted("https://chrome.google.com/webstore/detail/abc"));
+        assert!(is_restricted("https://addons.mozilla.org/en-US/firefox/addon/x/"));
+        assert!(!is_restricted("https://chrome.google.com/search"));
+        assert!(!is_restricted("https://example.com/"));
+    }
 
     fn yes(pattern: &str, url: &str) -> bool {
         any_matches(&[pattern.to_owned()], url)
