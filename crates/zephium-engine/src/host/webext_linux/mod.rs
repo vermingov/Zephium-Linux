@@ -222,6 +222,13 @@ impl super::EngineHost {
 
     /// A view of `profile` passed its security configuration: the profile's
     /// context now serves extension pages and carries the plugin.
+    /// A Firefox add-on file the person downloaded from addons.mozilla.org
+    /// is saved at `path`: the shell offers it for review.
+    pub(crate) fn addon_downloaded(&mut self, profile: ProfileId, path: PathBuf) {
+        trace!("add-on downloaded to {}", path.display());
+        self.sink.emit(EngineEvent::WebExtensionPackageFetched { profile, path });
+    }
+
     pub(super) fn linux_extensions_view_ready(&mut self, profile: ProfileId, view: &wry::WebView) {
         let Some(context) = view.webview().context() else {
             return;

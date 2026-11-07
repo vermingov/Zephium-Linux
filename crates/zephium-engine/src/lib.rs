@@ -1132,7 +1132,8 @@ impl RetirementGate {
             | event @ EngineEvent::WebExtensionAccessRequested(_)
             | event @ EngineEvent::WebExtensionAccessRemoved(_)
             | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
-            event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
+            event @ EngineEvent::WebExtensionDataInterest { profile, .. }
+            | event @ EngineEvent::WebExtensionPackageFetched { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
             EngineEvent::WebExtensionSettled {

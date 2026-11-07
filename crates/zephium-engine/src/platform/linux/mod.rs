@@ -1,6 +1,7 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
 //! composition root; the stage positions them and draws the drop indicator.
 
+mod addon_download;
 mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
@@ -432,7 +433,13 @@ pub fn configure(
     // the marker lives exactly as long as the context GLib object.
     let installed = unsafe { context.data::<bool>(DOWNLOAD_DENY_MARKER).is_some() };
     if !installed {
-        context.connect_download_started(|_, download| download.cancel());
+        // Private profiles run no extensions, so they take no add-on either.
+        let profile = partition.profile();
+        context.connect_download_started(move |_, download| {
+            if expected_ephemeral || !addon_download::take(download, profile) {
+                download.cancel();
+            }
+        });
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }

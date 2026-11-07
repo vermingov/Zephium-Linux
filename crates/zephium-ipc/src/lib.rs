@@ -1735,6 +1735,8 @@ pub enum Projection {
     WebExtensionAccessRequest(WebExtensionAccessRequestView),
     WebExtensionAccessRemoved(WebExtensionAccessRemovalView),
     WebExtensionStoreClick(WebExtensionStoreClickView),
+    /// A downloaded extension package to review, as if it had been dropped.
+    WebExtensionPackageFetched(String),
     UiCommand(String),
     FindResult(FindResultView),
     Search(SearchResults),

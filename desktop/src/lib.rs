@@ -7312,6 +7312,12 @@ pub fn run() {
                     EVENT_WEB_EXTENSION_STORE_CLICK,
                     &click,
                 ),
+                Projection::WebExtensionPackageFetched(path) => emit_to_privileged(
+                    &emit_handle,
+                    MAIN_LABEL,
+                    EVENT_WEB_EXTENSION_DROPPED,
+                    &path,
+                ),
                 Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
                     &emit_handle,
                     MAIN_LABEL,
