@@ -10,29 +10,62 @@ use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
-use webkit2gtk::{Download, DownloadExt, URIRequestExt};
+use webkit2gtk::glib::object::Cast;
+use webkit2gtk::{
+    Download, DownloadExt, PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt, URIRequestExt,
+    WebView, WebViewExt,
+};
 use zephium_core::ids::ProfileId;
 
 const ADDONS_HOST: &str = "addons.mozilla.org";
+/// Where addons.mozilla.org sends a file link on to.
+const ADDONS_FILES_HOST: &str = "addons.cdn.mozilla.net";
 /// The installer's own ceiling for a package.
 const MAX_BYTES: u64 = 256 * 1024 * 1024;
 
 /// Whether `url` is an add-on file on addons.mozilla.org, such as
-/// `https://addons.mozilla.org/firefox/downloads/file/123/name-1.0.xpi`.
+/// `https://addons.mozilla.org/firefox/downloads/file/123/name-1.0.xpi`, or
+/// on the file host it redirects to.
 pub(crate) fn is_addon_file(url: &str) -> bool {
     let Ok(url) = url::Url::parse(url) else {
         return false;
     };
-    url.scheme() == "https"
-        && url.host_str() == Some(ADDONS_HOST)
-        && url.port().is_none()
-        && url.path().contains("/downloads/file/")
-        && url.path().ends_with(".xpi")
+    let path = url.path();
+    let place = match url.host_str() {
+        Some(ADDONS_HOST) => path.contains("/downloads/file/"),
+        Some(ADDONS_FILES_HOST) => path.starts_with("/user-media/addons/"),
+        _ => false,
+    };
+    url.scheme() == "https" && url.port().is_none() && place && path.ends_with(".xpi")
+}
+
+/// WebKit cannot show an add-on file and would drop it: on `view`, such a
+/// response becomes a download, which `take` then keeps.
+pub(crate) fn offer_as_download(view: &WebView) {
+    view.connect_decide_policy(|_, decision, kind| {
+        if kind != PolicyDecisionType::Response {
+            return false;
+        }
+        let url = decision
+            .dynamic_cast_ref::<ResponsePolicyDecision>()
+            .and_then(|response| response.request())
+            .and_then(|request| request.uri())
+            .map(|uri| uri.to_string())
+            .unwrap_or_default();
+        if !is_addon_file(&url) {
+            return false;
+        }
+        decision.download();
+        true
+    });
 }
 
 /// Takes `download` if it is an add-on file; the caller cancels the rest.
 pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
     let url = download.request().and_then(|request| request.uri()).map(|uri| uri.to_string()).unwrap_or_default();
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("webext: download of {url} (an add-on file: {})", is_addon_file(&url));
+    }
     if !is_addon_file(&url) {
         return false;
     }
@@ -95,6 +128,8 @@ mod tests {
     fn only_add_on_files_from_addons_mozilla_org_are_taken() {
         assert!(is_addon_file("https://addons.mozilla.org/firefox/downloads/file/4412/ublock_origin-1.61.xpi"));
         assert!(is_addon_file("https://addons.mozilla.org/en-US/firefox/downloads/file/1/x.xpi"));
+        assert!(is_addon_file("https://addons.cdn.mozilla.net/user-media/addons/1/x-1.0.xpi"));
+        assert!(!is_addon_file("https://addons.cdn.mozilla.net/static/x.xpi"));
         assert!(!is_addon_file("http://addons.mozilla.org/firefox/downloads/file/1/x.xpi"));
         assert!(!is_addon_file("https://addons.mozilla.org.evil.test/firefox/downloads/file/1/x.xpi"));
         assert!(!is_addon_file("https://addons.mozilla.org/firefox/downloads/file/1/x.exe"));

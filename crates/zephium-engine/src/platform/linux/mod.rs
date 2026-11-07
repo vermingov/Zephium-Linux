@@ -444,6 +444,9 @@ pub fn configure(
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }
+    if !expected_ephemeral {
+        addon_download::offer_as_download(&view);
+    }
 
     // Extensions never run in private profiles, so their contexts get no
     // plugin. A persistent context attaches it here, before its first web
