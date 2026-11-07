@@ -19,11 +19,17 @@
   "bundle": {
     "linux": {
       "deb": {
-        "desktopTemplate": "linux/zephium.desktop.hbs"
+        "desktopTemplate": "linux/zephium.desktop.hbs",
+        "files": {
+          "/usr/lib/app.zephium/webext/libzephium_webext_process.so": "linux/webext/libzephium_webext_process.so"
+        }
       },
       "rpm": {
         "desktopTemplate": "linux/zephium.desktop.hbs"
       }
     }
+  },
+  "build": {
+    "beforeBuildCommand": "pnpm --dir ../frame build && sh linux/build-webext-plugin.sh"
   }
 }

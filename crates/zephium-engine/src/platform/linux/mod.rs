@@ -2,6 +2,7 @@
 //! composition root; the stage positions them and draws the drop indicator.
 
 mod content_filter;
+pub(crate) mod extension_channel;
 mod find;
 mod stage;
 
@@ -433,6 +434,15 @@ pub fn configure(
         context.connect_download_started(|_, download| download.cancel());
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+    }
+
+    // Extensions never run in private profiles, so their contexts get no
+    // plugin. A persistent context attaches it here, before its first web
+    // process, and every view on it listens for the plugin's messages.
+    if !expected_ephemeral {
+        if let Some(channel) = extension_channel::attach(&context) {
+            extension_channel::listen(&view, channel);
+        }
     }
 
     Ok(())
