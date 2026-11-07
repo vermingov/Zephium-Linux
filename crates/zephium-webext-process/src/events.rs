@@ -130,6 +130,11 @@ unsafe extern "C" fn message_received(
             })
             .collect()
     });
+    crate::trace(format_args!(
+        "event for {extension_id} in page {page_id} frame {frame_id}: {} listener(s) of {} known",
+        targets.len(),
+        LISTENERS.with(|listeners| listeners.borrow().len())
+    ));
     for listener in &targets {
         channel::call_with(listener.0, Some(&body));
     }

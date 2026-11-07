@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 
-use webkit2gtk::{WebContext, WebView, WebViewExt};
+use webkit2gtk::{SettingsExt, WebContext, WebView, WebViewExt};
 use wry::WebViewExtUnix;
 use zephium_core::extensions::ExtensionRuntimeGeneration;
 use zephium_core::ids::{ExtensionInstallId, ProfileId};
@@ -300,6 +300,13 @@ fn start_background(context: &WebContext, channel: &Rc<Channel>, install: &Insta
     extension_channel::listen(&view, channel.clone());
     let url = format!("{}{}", install.origin(), path.trim_start_matches('/'));
     trace!("background of {} starts at {url}", install.extension_id);
+    // With the trace on, the page's console (script errors, refused loads)
+    // goes to the log too.
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        if let Some(settings) = WebViewExt::settings(&view) {
+            settings.set_enable_write_console_messages_to_stdout(true);
+        }
+    }
     view.connect_load_changed(|view, event| trace!("background {:?}: {event:?}", view.uri()));
     view.connect_load_failed(|view, _, uri, error| {
         trace!("background {:?} failed to load {uri}: {error}", view.uri());

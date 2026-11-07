@@ -92,7 +92,10 @@ unsafe extern "C" fn main_world_cleared(
             }
             // This process may predate the extension: ask, and reload the
             // page here once if it turns out to be enabled.
-            None if is_extension_id(host) && ok(webkit_frame_is_main_frame(frame)) => config::request(page, true),
+            None if is_extension_id(host) && ok(webkit_frame_is_main_frame(frame)) => {
+                crate::trace(format_args!("{host} is not known in this process yet; asking"));
+                config::request(page, true)
+            }
             None => {}
         }
         return;

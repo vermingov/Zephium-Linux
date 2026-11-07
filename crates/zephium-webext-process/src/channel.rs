@@ -36,6 +36,7 @@ impl Sender {
 /// and its kind. Everything is read-only and non-configurable, so code in the
 /// world can use it but not replace it.
 pub(crate) unsafe fn install(context: *mut JSCContext, sender: Sender, info: &str, kind: &str) {
+    crate::trace(format_args!("{kind} channel for {} in page {} frame {}", sender.extension_id, sender.page_id, sender.frame_id));
     let key = Key { page_id: sender.page_id, frame_id: sender.frame_id, extension_id: sender.extension_id.clone() };
     define_function(context, SEND_FUNCTION, send, Box::into_raw(Box::new(sender)).cast(), drop_box::<Sender>);
     define_function(context, LISTEN_FUNCTION, listen, Box::into_raw(Box::new(key)).cast(), drop_box::<Key>);
@@ -144,6 +145,7 @@ unsafe extern "C" fn listen(args: *mut glib::ffi::GPtrArray, data: *mut c_void) 
         throw(jsc_value_get_context(*listener), c"listen(listener) takes a function");
         return;
     }
+    crate::trace(format_args!("listener for {} in page {} frame {}", key.extension_id, key.page_id, key.frame_id));
     events::register(key.clone(), *listener);
 }
 

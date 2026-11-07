@@ -11,6 +11,15 @@
 //! handler to call around them. The reasoning is in the port's
 //! docs/extensions.md.
 
+/// The runtime's step-by-step log in the web process, when the browser runs
+/// with `ZEPHIUM_WEBEXT_TRACE` set and WebKit passes it on.
+#[cfg(all(unix, not(target_os = "macos")))]
+pub(crate) fn trace(line: std::fmt::Arguments) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("webext plugin: {line}");
+    }
+}
+
 #[cfg(all(unix, not(target_os = "macos")))]
 mod channel;
 #[cfg(all(unix, not(target_os = "macos")))]
