@@ -7895,6 +7895,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zephium-webext-process"
+version = "0.1.0"
+dependencies = [
+ "glib",
+ "gtk",
+ "webkit2gtk",
+]
+
+[[package]]
 name = "zephium-webext-windows"
 version = "0.1.0"
 dependencies = [
