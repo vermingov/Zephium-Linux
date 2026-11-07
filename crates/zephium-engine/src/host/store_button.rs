@@ -104,6 +104,10 @@ impl EngineHost {
     }
 
     pub(crate) fn show_store_button(&mut self, id: ItemId, button: StoreButton) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+            eprintln!("store button: asked to show {} on a view showing {:?}", button.extension, self.committed_listing(id));
+        }
         let label_chars = button.label.chars().count();
         if label_chars == 0
             || label_chars > MAX_STORE_BUTTON_LABEL_CHARS

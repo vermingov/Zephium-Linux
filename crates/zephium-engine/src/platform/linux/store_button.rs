@@ -21,6 +21,13 @@ const WORLD: &str = "zephium-store";
 const HANDLER: &str = "zephiumStore";
 const STORE_PAGES: &str = "https://chromewebstore.google.com/*";
 const MAX_BODY_UTF16: usize = 64;
+
+/// One step of the button, when `ZEPHIUM_WEBEXT_TRACE` is set.
+fn trace(step: std::fmt::Arguments<'_>) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("store button: {step}");
+    }
+}
 /// A body this long in bytes is refused before it is measured in UTF-16.
 const MAX_BODY_BYTES: usize = 4 * MAX_BODY_UTF16;
 
@@ -60,11 +67,14 @@ impl StoreButton {
             let Some(view) = page.upgrade() else {
                 return;
             };
-            if let Some(message) = body(result).and_then(|body| admit(&view, &body)) {
+            let message = body(result).and_then(|body| admit(&view, &body));
+            trace(format_args!("message {message:?}"));
+            if let Some(message) = message {
                 on_message(message);
             }
         });
         if !manager.register_script_message_handler_in_world(HANDLER, WORLD) {
+            trace(format_args!("the handler could not be registered"));
             manager.disconnect(signal);
             return None;
         }
@@ -87,7 +97,12 @@ impl StoreButton {
             return;
         };
         let script = format!("window.__zephium_store_v1__?.show({state})");
-        view.evaluate_javascript(&script, Some(WORLD), None, None::<&gtk::gio::Cancellable>, |_| {});
+        trace(format_args!("show {state}"));
+        view.evaluate_javascript(&script, Some(WORLD), None, None::<&gtk::gio::Cancellable>, |result| {
+            if let Err(error) = result {
+                trace(format_args!("show failed: {error}"));
+            }
+        });
     }
 }
 
