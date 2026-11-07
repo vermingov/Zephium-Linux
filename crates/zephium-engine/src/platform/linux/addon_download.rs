@@ -63,9 +63,7 @@ pub(crate) fn offer_as_download(view: &WebView) {
 /// Takes `download` if it is an add-on file; the caller cancels the rest.
 pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
     let url = download.request().and_then(|request| request.uri()).map(|uri| uri.to_string()).unwrap_or_default();
-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
-        eprintln!("webext: download of {url} (an add-on file: {})", is_addon_file(&url));
-    }
+    trace(format_args!("download of {url} (an add-on file: {})", is_addon_file(&url)));
     if !is_addon_file(&url) {
         return false;
     }
@@ -74,6 +72,7 @@ pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
     };
     let target = url::Url::from_file_path(&path).map(String::from).unwrap_or_default();
     download.connect_decide_destination(move |download, _| {
+        trace(format_args!("saving to {target}"));
         download.set_destination(&target);
         true
     });
@@ -85,12 +84,14 @@ pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
     let failed = Rc::new(Cell::new(false));
     let failure = failed.clone();
     let partial = path.clone();
-    download.connect_failed(move |_, _| {
+    download.connect_failed(move |_, error| {
+        trace(format_args!("failed: {error}"));
         failure.set(true);
         let _ = std::fs::remove_file(&partial);
     });
     // `finished` follows `failed` too.
     download.connect_finished(move |_| {
+        trace(format_args!("finished; saved: {}", path.is_file()));
         if failed.get() || !path.is_file() {
             return;
         }
@@ -98,6 +99,13 @@ pub(crate) fn take(download: &Download, profile: ProfileId) -> bool {
         let _ = crate::host::try_with(move |host| host.addon_downloaded(profile, path));
     });
     true
+}
+
+/// One step of an add-on download, when `ZEPHIUM_WEBEXT_TRACE` is set.
+fn trace(step: std::fmt::Arguments<'_>) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("webext: add-on {step}");
+    }
 }
 
 /// A new file in the user's private runtime folder, where nobody else can
