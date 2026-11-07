@@ -33,7 +33,9 @@ const MEASURE_POPUP: &str = r#"(() => {
   const root = document.documentElement;
   const saved = root.style.width;
   root.style.width = "fit-content";
-  const size = `${Math.ceil(root.getBoundingClientRect().width)},${Math.ceil(root.scrollHeight)}`;
+  // The root's own box: scrollHeight never drops below the window's height.
+  const box = root.getBoundingClientRect();
+  const size = `${Math.ceil(box.width)},${Math.ceil(box.height)}`;
   root.style.width = saved;
   return size;
 })()"#;
