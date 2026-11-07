@@ -5,6 +5,7 @@ mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
 mod stage;
+pub(crate) mod store_button;
 
 pub(crate) fn external_app_name(_url: &str) -> Option<String> {
     None
