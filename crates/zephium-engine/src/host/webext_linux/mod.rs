@@ -120,7 +120,7 @@ impl Install {
         let manifest = Manifest::load(&load.root).map_err(|error| error.to_string())?;
         let origin = format!("chrome-extension://{}/", load.extension_id);
         let info = zephium_webext_linux::info::info(&load.extension_id, &origin, &load.root, &manifest);
-        let groups = zephium_webext_linux::content::groups(&load.root, &manifest)?
+        let groups = zephium_webext_linux::content::runnable(zephium_webext_linux::content::groups(&load.root, &manifest)?)
             .into_iter()
             .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
             .collect();

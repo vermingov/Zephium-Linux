@@ -47,6 +47,35 @@ pub fn groups(package: &Path, manifest: &Manifest) -> Result<Vec<Group>, String>
         .collect()
 }
 
+/// The groups as the web-process plugin runs them: scripts only. A group's
+/// CSS goes into the page at `document_start` whatever the group's timing,
+/// as Chrome inserts it before the page is built, so it becomes a group of
+/// its own that adds the styles.
+pub fn runnable(groups: Vec<Group>) -> Vec<Group> {
+    groups
+        .into_iter()
+        .flat_map(|group| {
+            let styles = (!group.css.is_empty()).then(|| Group {
+                js: vec![style_inserter(&group.css)],
+                css: Vec::new(),
+                run_at: "document_start",
+                ..group.clone()
+            });
+            let scripts = (!group.js.is_empty()).then(|| Group { css: Vec::new(), ..group });
+            styles.into_iter().chain(scripts)
+        })
+        .collect()
+}
+
+/// A script that adds `css` to the document as soon as it has a root
+/// element; at `document_start` it has none yet.
+fn style_inserter(css: &[String]) -> String {
+    let text = serde_json::Value::String(css.join("\n"));
+    format!(
+        r#"(() => {{ const style = document.createElement("style"); style.textContent = {text}; const place = () => (document.head || document.documentElement).append(style); if (document.documentElement) place(); else new MutationObserver((_, observer) => {{ if (document.documentElement) {{ observer.disconnect(); place(); }} }}).observe(document, {{ childList: true }}); }})()"#
+    )
+}
+
 fn read_all(package: &Path, paths: &[String]) -> Result<Vec<String>, String> {
     paths.iter().map(|path| read(package, path)).collect()
 }
@@ -92,6 +121,24 @@ mod tests {
         assert_eq!(groups[0].css, ["p{}"]);
         assert_eq!(groups[0].run_at, "document_start");
         assert!(groups[0].all_frames);
+    }
+
+    #[test]
+    fn css_runs_at_document_start_in_a_group_of_its_own() {
+        let group = Group {
+            matches: vec!["<all_urls>".into()],
+            exclude_matches: Vec::new(),
+            js: vec!["one()".into()],
+            css: vec!["p { color: red }".into()],
+            run_at: "document_idle",
+            all_frames: false,
+        };
+        let groups = runnable(vec![group.clone(), Group { js: Vec::new(), ..group }]);
+        assert_eq!(groups.len(), 3, "styles and scripts, then styles alone");
+        assert_eq!(groups[0].run_at, "document_start");
+        assert!(groups[0].js[0].contains("p { color: red }"));
+        assert_eq!((groups[1].run_at, groups[1].js.as_slice()), ("document_idle", ["one()".to_owned()].as_slice()));
+        assert!(groups.iter().all(|group| group.css.is_empty()));
     }
 
     #[test]
