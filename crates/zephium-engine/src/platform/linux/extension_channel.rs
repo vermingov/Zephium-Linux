@@ -28,6 +28,13 @@ const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 pub(crate) const MESSAGE_LIMIT: usize = 64 * 1_024;
 const CHANNEL_KEY: &str = "zephium-extension-channel";
 
+/// The runtime's step-by-step log (see host::webext_linux's `trace!`).
+fn trace(line: std::fmt::Arguments) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("webext: {line}");
+    }
+}
+
 type Handler = Rc<dyn Fn(Message)>;
 
 /// What the plugin needs of one enabled extension: its ID, the info block
@@ -160,13 +167,16 @@ pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
     view.connect_user_message_received(move |view, message| {
         // A process WebKit started earlier asks for the current list.
         if message.name().as_deref() == Some(CONFIG_REQUEST) {
+            trace(format_args!("{:?} asked for the extension list", view.uri()));
             message.send_reply(&UserMessage::new(CONFIG_REQUEST, Some(&channel.current_data())));
             return true;
         }
         if message.name().as_deref() != Some(SEND_MESSAGE) {
             return false;
         }
+        trace(format_args!("{:?} sends to the browser", view.uri()));
         let Some(accepted) = channel.accept(view, message) else {
+            trace(format_args!("refused a message from {:?}", view.uri()));
             // Refused: no reply with content, and nothing acts on it.
             message.send_reply(&UserMessage::new("reply", None));
             return true;
@@ -184,12 +194,15 @@ pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
 /// the page could not be reached).
 pub(crate) fn raise(view: &WebView, extension_id: &str, frame_id: u64, body: &str, counted: impl FnOnce(u32) + 'static) {
     let event = UserMessage::new(EVENT_MESSAGE, Some(&(extension_id, frame_id, body).to_variant()));
+    let target = view.uri();
     view.send_message_to_page(&event, None::<&gtk::gio::Cancellable>, move |reply| {
-        let count = reply
-            .ok()
-            .and_then(|reply| reply.parameters())
-            .and_then(|parameters| parameters.get::<(u32,)>())
-            .map_or(0, |(count,)| count);
+        let count = match reply {
+            Ok(reply) => reply.parameters().and_then(|parameters| parameters.get::<(u32,)>()).map_or(0, |(count,)| count),
+            Err(error) => {
+                trace(format_args!("event to {target:?} was not taken: {error}"));
+                0
+            }
+        };
         counted(count);
     });
 }
