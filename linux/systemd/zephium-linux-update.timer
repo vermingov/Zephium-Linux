@@ -1,0 +1,11 @@
+[Unit]
+Description=Check for a new Zephium every hour
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=10min
+# A run missed while the machine was off happens soon after it starts.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
