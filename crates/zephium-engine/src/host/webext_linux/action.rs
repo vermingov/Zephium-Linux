@@ -24,6 +24,26 @@ use crate::platform::imp::extension_channel;
 
 /// The popup's size until its page says otherwise.
 const POPUP_SIZE: (i32, i32) = (380, 520);
+/// Chrome's bounds for a popup sized to its page.
+const POPUP_MIN: i32 = 25;
+const POPUP_MAX: (i32, i32) = (800, 600);
+/// The page's preferred size, as Chrome sizes a popup: its width when
+/// nothing stretches it, and its height at that width.
+const MEASURE_POPUP: &str = r#"(() => {
+  const root = document.documentElement;
+  const saved = root.style.width;
+  root.style.width = "fit-content";
+  const size = `${Math.ceil(root.getBoundingClientRect().width)},${Math.ceil(root.scrollHeight)}`;
+  root.style.width = saved;
+  return size;
+})()"#;
+
+// javascriptcore-rs is Wry's private dependency; the one string read a
+// measured popup needs goes through JSC's stable C ABI.
+unsafe extern "C" {
+    fn jsc_value_is_string(value: *mut std::ffi::c_void) -> i32;
+    fn jsc_value_to_string_as_bytes(value: *mut std::ffi::c_void) -> *mut gtk::glib::ffi::GBytes;
+}
 const ICON_SIZE: i32 = 32;
 
 /// One extension's toolbar action. Each property has a default and per-tab
@@ -250,7 +270,7 @@ impl super::super::EngineHost {
                 }
                 let url = format!("{}{}", install.origin(), popup);
                 let rect = request.anchor().rect();
-                install.popup = Some(open_popup(&context, channel, &parent, &url, rect, profile, install.extension_id.clone()));
+                install.popup = Some(open_popup(&context, channel, &parent, &url, rect, profile, install.extension_id.clone(), &install.loaded.name));
                 ExtensionActionSettlement::PopupPresented(Size { width: f64::from(POPUP_SIZE.0), height: f64::from(POPUP_SIZE.1) })
             }
             None => {
@@ -288,6 +308,7 @@ fn open_popup(
     anchor: zephium_core::geometry::Rect,
     profile: ProfileId,
     extension_id: String,
+    title: &str,
 ) -> Popup {
     let view = WebView::with_context(context);
     // Popups are small; software rendering keeps them off the GPU paths
@@ -305,6 +326,7 @@ fn open_popup(
     window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
     window.set_skip_taskbar_hint(true);
     window.set_skip_pager_hint(true);
+    window.set_title(title);
     window.set_default_size(POPUP_SIZE.0, POPUP_SIZE.1);
     if let Some(top) = parent.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) {
         window.set_transient_for(Some(&top));
@@ -349,10 +371,48 @@ fn open_popup(
         super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
     });
 
+    // Once loaded, the window takes the page's own size.
+    let sized_window = window.clone();
+    view.connect_load_changed(move |view, event| {
+        if event != webkit2gtk::LoadEvent::Finished {
+            return;
+        }
+        let window = sized_window.clone();
+        view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
+            if let Some((width, height)) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
+                window.resize(width, height);
+            }
+        });
+    });
+
     view.load_uri(url);
     window.show_all();
     window.present();
     Popup { view, window }
+}
+
+/// `"width,height"` as the popup's size within Chrome's bounds.
+fn popup_size(measured: &str) -> Option<(i32, i32)> {
+    let (width, height) = measured.split_once(',')?;
+    let (width, height): (i32, i32) = (width.trim().parse().ok()?, height.trim().parse().ok()?);
+    Some((width.clamp(POPUP_MIN, POPUP_MAX.0), height.clamp(POPUP_MIN, POPUP_MAX.1)))
+}
+
+/// A JavaScript string result as Rust text.
+fn js_string(value: &impl gtk::glib::ObjectType) -> Option<String> {
+    let value = value.as_ptr().cast::<std::ffi::c_void>();
+    // SAFETY: a live JSCValue borrowed for this call.
+    if unsafe { jsc_value_is_string(value) } == 0 {
+        return None;
+    }
+    // SAFETY: as above; the call hands over one GBytes reference, which
+    // `from_glib_full` takes.
+    let raw = unsafe { jsc_value_to_string_as_bytes(value) };
+    if raw.is_null() {
+        return None;
+    }
+    let bytes: gtk::glib::Bytes = unsafe { gtk::glib::translate::from_glib_full(raw) };
+    std::str::from_utf8(&bytes).ok().map(str::to_owned)
 }
 
 /// A revision that changes exactly when what the button shows changes.
@@ -361,4 +421,16 @@ fn revision(label: &str, badge: &str, icon: Option<&ExtensionActionIcon>, enable
     (label, badge, enabled, popup).hash(&mut hasher);
     icon.map(|icon| format!("{icon:?}")).hash(&mut hasher);
     ExtensionActionRevision::new(hasher.finish() | 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::popup_size;
+
+    #[test]
+    fn popups_take_their_page_size_within_chromes_bounds() {
+        assert_eq!(popup_size("320,240"), Some((320, 240)));
+        assert_eq!(popup_size("4000,3"), Some((800, 25)));
+        assert_eq!(popup_size("wide"), None);
+    }
 }
