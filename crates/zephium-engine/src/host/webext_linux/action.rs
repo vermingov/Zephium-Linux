@@ -1,5 +1,5 @@
 //! Toolbar actions: what each extension's button shows, and what clicking it
-//! does, opening its popup in a popover or raising `action.onClicked`.
+//! does, opening its popup window or raising `action.onClicked`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -104,16 +104,17 @@ fn icon_from_file(path: &Path) -> Option<ExtensionActionIcon> {
     ExtensionActionIcon::from_rgba(rgba).ok()
 }
 
-/// An open popup: a view of the extension's popup page in a popover.
+/// An open popup: the extension's popup page in a small window of its own.
+/// Upstream's Linux stage keeps its overlays out of the browser window's
+/// widget tree the same way; a popover inside it took the page views down.
 pub(super) struct Popup {
     pub(super) view: WebView,
-    popover: gtk::Popover,
+    window: gtk::Window,
 }
 
 impl Popup {
     pub(super) fn close(self) {
-        self.popover.popdown();
-        self.popover.remove(&self.view);
+        self.window.close();
         self.view.try_close();
     }
 }
@@ -267,7 +268,7 @@ impl super::super::EngineHost {
         tabs.into_iter().find(|candidate| number.is_some_and(|number| candidate["id"] == number)).unwrap_or(Value::Null)
     }
 
-    /// The popover closed itself (a click outside, or the page closed it).
+    /// The popup window closed itself (focus left it, or the page closed it).
     fn linux_popup_closed(&mut self, profile: ProfileId, extension_id: &str, view: &WebView) {
         if let Some(install) = self.linux_extensions.profiles.get_mut(&profile).and_then(|state| state.install_mut(extension_id)) {
             if install.popup.as_ref().is_some_and(|popup| &popup.view == view) {
@@ -289,31 +290,69 @@ fn open_popup(
     extension_id: String,
 ) -> Popup {
     let view = WebView::with_context(context);
-    view.set_size_request(POPUP_SIZE.0, POPUP_SIZE.1);
-    // GPU compositing has no surface inside a GTK3 popover: the view drew
-    // black and stopped the window's other views from redrawing. Software
-    // rendering is plenty for a popup page.
+    // Popups are small; software rendering keeps them off the GPU paths
+    // that a nested view had trouble with.
     if let Some(settings) = WebViewExt::settings(&view) {
         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
     }
     view.set_background_color(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
     extension_channel::listen(&view, channel);
-    let popover = gtk::Popover::new(Some(parent));
-    popover.set_pointing_to(&gtk::gdk::Rectangle::new(anchor.x as i32, anchor.y as i32, anchor.width.max(1.0) as i32, anchor.height.max(1.0) as i32));
-    popover.add(&view);
-    view.load_uri(url);
-    let closed_view = view.clone();
-    let closed_extension = extension_id.clone();
-    popover.connect_closed(move |_| {
+
+    // A toplevel, not a popup-type window: popup windows get no keyboard on
+    // Wayland, and extension popups take typing (passwords, search).
+    let window = gtk::Window::new(gtk::WindowType::Toplevel);
+    window.set_decorated(false);
+    window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
+    window.set_skip_taskbar_hint(true);
+    window.set_skip_pager_hint(true);
+    window.set_default_size(POPUP_SIZE.0, POPUP_SIZE.1);
+    if let Some(top) = parent.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) {
+        window.set_transient_for(Some(&top));
+        window.set_destroy_with_parent(true);
+    }
+    // Under the button where the platform lets a window choose its place
+    // (X11); Wayland compositors place transient dialogs themselves.
+    if let Some((x, y)) = parent.window().map(|surface| {
+        let (_, x, y) = surface.origin();
+        (x, y)
+    }) {
+        window.move_(x + anchor.x as i32, y + (anchor.y + anchor.height) as i32);
+    }
+    window.add(&view);
+
+    // Chrome closes a popup when it loses focus. Only after it had focus
+    // once: it can be told it lost focus before it was shown.
+    let focused = std::rc::Rc::new(std::cell::Cell::new(false));
+    let had_focus = focused.clone();
+    window.connect_focus_in_event(move |_, _| {
+        had_focus.set(true);
+        gtk::glib::Propagation::Proceed
+    });
+    window.connect_key_press_event(|window, event| {
+        if event.keyval() == gtk::gdk::keys::constants::Escape {
+            window.close();
+            return gtk::glib::Propagation::Stop;
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    window.connect_focus_out_event(move |window, _| {
+        if focused.get() {
+            window.close();
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    let page_window = window.clone();
+    view.connect_close(move |_| page_window.close());
+    let (closed_view, closed_extension) = (view.clone(), extension_id);
+    window.connect_destroy(move |_| {
         let (view, extension_id) = (closed_view.clone(), closed_extension.clone());
         super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
     });
-    // `window.close()` in the popup page closes the popover.
-    let page_popover = popover.clone();
-    view.connect_close(move |_| page_popover.popdown());
-    view.show();
-    popover.popup();
-    Popup { view, popover }
+
+    view.load_uri(url);
+    window.show_all();
+    window.present();
+    Popup { view, window }
 }
 
 /// A revision that changes exactly when what the button shows changes.
