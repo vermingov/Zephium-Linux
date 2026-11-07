@@ -117,6 +117,25 @@ impl Drop for ContentPolicyRegistration {
     }
 }
 
+/// Puts `policy`'s compiled list on `view`. WebKit keys lists by their
+/// identifier, so adding one already there leaves it there once.
+pub(crate) fn add_to_view(view: &webkit2gtk::WebView, policy: &NativeContentPolicy) {
+    let (Some(manager), NativeContentPolicy::Declarative { filter, .. }) = (view.user_content_manager(), policy) else {
+        return;
+    };
+    // SAFETY: both objects are alive for the call; WebKit takes its own reference.
+    unsafe { webkit2gtk::ffi::webkit_user_content_manager_add_filter(manager.to_glib_none().0, filter.0.as_ptr()) };
+}
+
+/// Takes `policy`'s compiled list off `view`, if it is there.
+pub(crate) fn remove_from_view(view: &webkit2gtk::WebView, policy: &NativeContentPolicy) {
+    let (Some(manager), NativeContentPolicy::Declarative { filter, .. }) = (view.user_content_manager(), policy) else {
+        return;
+    };
+    // SAFETY: as above.
+    unsafe { webkit2gtk::ffi::webkit_user_content_manager_remove_filter(manager.to_glib_none().0, filter.0.as_ptr()) };
+}
+
 pub(crate) fn install_scoped_on_view(
     view: &wry::WebView,
     policy: &NativeContentPolicy,

@@ -7676,6 +7676,7 @@ dependencies = [
  "zephium-store",
  "zephium-voice",
  "zephium-webext",
+ "zephium-webext-linux",
  "zephium-webext-macos",
  "zephium-work-composition",
 ]
@@ -7706,6 +7707,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "soup3",
  "tempfile",
  "url",
  "webkit2gtk",
@@ -7719,6 +7721,7 @@ dependencies = [
  "zephium-blocker",
  "zephium-core",
  "zephium-webext",
+ "zephium-webext-linux",
  "zephium-webext-macos",
  "zephium-webext-process",
  "zeroize",
@@ -7888,6 +7891,15 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "zip",
+]
+
+[[package]]
+name = "zephium-webext-linux"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "tempfile",
+ "zephium-webext",
 ]
 
 [[package]]

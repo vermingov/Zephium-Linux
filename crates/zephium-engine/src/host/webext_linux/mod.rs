@@ -9,6 +9,9 @@
 
 mod action;
 mod api;
+mod dnr;
+mod events;
+mod registered;
 mod routing;
 mod scheme;
 
@@ -67,6 +70,9 @@ pub(super) struct ProfileExtensions {
     packages: scheme::Packages,
     installs: HashMap<ExtensionInstallId, Install>,
     routing: routing::Routing,
+    /// The browser window that last had focus: a popup, in a window of its
+    /// own, still belongs to it, as Chrome's "current window".
+    last_focused: Option<zephium_core::ids::WindowId>,
 }
 
 impl ProfileExtensions {
@@ -93,6 +99,10 @@ pub(super) struct Install {
     pub(super) hosts: Vec<String>,
     pub(super) background: Option<WebView>,
     pub(super) storage: api::Storage,
+    pub(super) dnr: dnr::Rules,
+    /// The manifest's content scripts, and those registered at run time.
+    manifest_groups: Vec<zephium_webext_linux::content::Group>,
+    pub(super) registered: registered::Registered,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -112,6 +122,15 @@ impl Install {
         self.background.iter().cloned().chain(self.popup.as_ref().map(|popup| popup.view.clone())).collect()
     }
 
+    /// The plugin's groups: the manifest's scripts, then the registered ones.
+    pub(super) fn refresh_groups(&mut self) {
+        let groups = self.manifest_groups.iter().cloned().chain(self.registered.groups(&self.root)).collect();
+        self.channel.groups = zephium_webext_linux::content::runnable(groups)
+            .into_iter()
+            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
+            .collect();
+    }
+
     fn prepare(
         load: &WebExtensionLoad,
         generation: ExtensionRuntimeGeneration,
@@ -120,10 +139,7 @@ impl Install {
         let manifest = Manifest::load(&load.root).map_err(|error| error.to_string())?;
         let origin = format!("chrome-extension://{}/", load.extension_id);
         let info = zephium_webext_linux::info::info(&load.extension_id, &origin, &load.root, &manifest);
-        let groups = zephium_webext_linux::content::groups(&load.root, &manifest)?
-            .into_iter()
-            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
-            .collect();
+        let manifest_groups = zephium_webext_linux::content::groups(&load.root, &manifest)?;
         let loaded = WebExtensionLoaded {
             name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
             version: manifest.version().unwrap_or("0").to_owned(),
@@ -134,7 +150,7 @@ impl Install {
             accessible: web_accessible(&manifest),
             background: background_page(&manifest),
         };
-        Ok(Self {
+        let mut install = Self {
             id: load.install,
             extension_id: load.extension_id.clone(),
             generation,
@@ -144,19 +160,24 @@ impl Install {
                 id: load.extension_id.clone(),
                 info,
                 granted: load.match_patterns.clone(),
-                groups,
+                groups: Vec::new(),
             },
             package,
             permissions: load.permissions.clone(),
             hosts: load.match_patterns.clone(),
             background: None,
+            dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
+            manifest_groups,
+            registered: registered::Registered::open(storage.as_deref()),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
             popup: None,
             active_tabs: HashSet::new(),
             manifest,
-        })
+        };
+        install.refresh_groups();
+        Ok(install)
     }
 
     fn stop(&mut self) {
@@ -186,6 +207,7 @@ impl super::EngineHost {
             loaded
         });
         self.linux_extensions_sync(profile);
+        self.linux_dnr_rebuild(profile, &load.extension_id);
         self.sink.emit(EngineEvent::WebExtensionSettled { profile, install: load.install, result });
         self.sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
     }
@@ -219,6 +241,13 @@ impl super::EngineHost {
         self.linux_request_tab(profile, Some(url), true);
     }
 
+    /// A Firefox add-on file the person downloaded from addons.mozilla.org
+    /// is saved at `path`: the shell offers it for review.
+    pub(crate) fn addon_downloaded(&mut self, profile: ProfileId, path: PathBuf) {
+        trace!("add-on downloaded to {}", path.display());
+        self.sink.emit(EngineEvent::WebExtensionPackageFetched { profile, path });
+    }
+
     /// A view of `profile` passed its security configuration: the profile's
     /// context now serves extension pages and carries the plugin.
     pub(super) fn linux_extensions_view_ready(&mut self, profile: ProfileId, view: &wry::WebView) {
@@ -237,6 +266,8 @@ impl super::EngineHost {
             state.context = Some(context);
         }
         self.linux_extensions_sync(profile);
+        // The view is not among the profile's tabs until it is built.
+        self.linux_dnr_add_to(profile, &view.webview());
     }
 
     /// Bring the plugin's startup data, the served packages, the background
@@ -269,6 +300,7 @@ impl super::EngineHost {
         }
         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
         self.linux_extensions.set_navigation(profile, ids);
+        self.linux_dnr_sync(profile);
     }
 
     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {
@@ -276,6 +308,9 @@ impl super::EngineHost {
         let mut removed = state.installs.remove(&install)?;
         removed.stop();
         state.routing.forget_extension(&removed.extension_id);
+        if let Some(policy) = removed.dnr.applied.take() {
+            self.linux_dnr_remove(profile, &policy);
+        }
         Some(removed)
     }
 
