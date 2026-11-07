@@ -751,6 +751,8 @@ pub(in crate::webext) async fn list(
 fn platform() -> Platform {
     if cfg!(target_os = "windows") {
         Platform::Windows
+    } else if cfg!(target_os = "linux") {
+        Platform::Linux
     } else {
         Platform::Macos
     }
