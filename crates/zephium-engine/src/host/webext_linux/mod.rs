@@ -9,6 +9,7 @@
 
 mod action;
 mod api;
+mod events;
 mod routing;
 mod scheme;
 

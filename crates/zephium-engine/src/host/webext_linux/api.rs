@@ -549,10 +549,7 @@ impl super::super::EngineHost {
         public_windows(&surface)
             .map(|window| {
                 let id = state.routing.windows.number(window.id());
-                let mut value = json!({
-                    "id": id, "focused": surface.focused() == Some(window.id()), "incognito": false,
-                    "type": "normal", "state": "normal", "alwaysOnTop": false,
-                });
+                let mut value = window_value(id, surface.focused() == Some(window.id()));
                 if populate {
                     value["tabs"] = Value::Array(window.tabs().iter().enumerate().map(|(index, tab)| tab_value(state, window, index, tab)).collect());
                 }
@@ -674,11 +671,15 @@ fn linux_notification(extension_id: &str, method: &str, args: &[Value]) -> Resul
     }
 }
 
-fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
+pub(super) fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
     surface.windows().iter().filter(|window| !window.is_private())
 }
 
-fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
+pub(super) fn window_value(id: i64, focused: bool) -> Value {
+    json!({ "id": id, "focused": focused, "incognito": false, "type": "normal", "state": "normal", "alwaysOnTop": false })
+}
+
+pub(super) fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
     let active = window.active() == Some(tab.id());
     json!({
         "id": state.routing.tabs.number(tab.id()),
