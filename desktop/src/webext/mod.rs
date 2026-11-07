@@ -766,7 +766,7 @@ pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
         return None;
     };
     let package = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("crx" | "zip") => path.is_file(),
+        Some("crx" | "zip" | "xpi") => path.is_file(),
         _ => path.join("manifest.json").is_file(),
     };
     package.then(|| path.to_string_lossy().into_owned())

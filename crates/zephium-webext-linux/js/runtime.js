@@ -256,6 +256,8 @@
     reload: undefined,
     getURL: (path) => new URL(String(path), info.baseUrl).href,
     getManifest: () => JSON.parse(JSON.stringify(info.manifest)),
+    // Firefox's: add-ons ask which browser runs them.
+    getBrowserInfo: () => Promise.resolve({ name: "Zephium", vendor: "Zephium", version: "1.0", buildID: "" }),
   }, ["onMessage", "onMessageExternal", "onConnect", "onInstalled", "onStartup", "onSuspend", "onUpdateAvailable"]);
   Object.defineProperty(runtime, "id", { value: info.id, enumerable: true });
   Object.defineProperty(runtime, "lastError", { get: () => lastError, enumerable: true });
