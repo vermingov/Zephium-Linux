@@ -119,7 +119,10 @@ fn respond(request: &URISchemeRequest, bytes: Vec<u8>, mime: &str, csp: Option<&
     let stream = gtk::gio::MemoryInputStream::from_bytes(&gtk::glib::Bytes::from_owned(bytes));
     let response = URISchemeResponse::new(&stream, length);
     response.set_content_type(mime);
+    // These headers replace the response's own, so the type goes in here too:
+    // with nosniff, WebKit runs no script whose header lacks a script type.
     let headers = soup::MessageHeaders::new(soup::MessageHeadersType::Response);
+    headers.append("Content-Type", mime);
     if let Some(csp) = csp {
         headers.append("Content-Security-Policy", csp);
     }
