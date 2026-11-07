@@ -116,7 +116,7 @@ pub(in crate::webext) async fn choose_file(
             dialog.blocking_pick_folder()
         } else {
             dialog
-                .add_filter("Chrome extension", &["crx", "zip"])
+                .add_filter("Chrome extension or Firefox add-on", &["crx", "zip", "xpi"])
                 .blocking_pick_file()
         }
     })
@@ -402,10 +402,11 @@ fn unsigned_id(dir: &Path, source: &Path) -> Result<ExtensionId, String> {
                 .decode(key.trim())
                 .ok()
         });
-    Ok(match key {
-        Some(key) => ExtensionId::from_public_key(&key),
-        None if cfg!(target_os = "windows") => return Err("On Windows, use a signed CRX or an unpacked extension with a manifest key. A stable native identity is required.".into()),
-        None => ExtensionId::from_source_path(&source.to_string_lossy()),
+    Ok(match (key, manifest.gecko_id()) {
+        (Some(key), _) => ExtensionId::from_public_key(&key),
+        (None, Some(gecko_id)) => ExtensionId::from_gecko_id(gecko_id),
+        (None, None) if cfg!(target_os = "windows") => return Err("On Windows, use a signed CRX or an unpacked extension with a manifest key. A stable native identity is required.".into()),
+        (None, None) => ExtensionId::from_source_path(&source.to_string_lossy()),
     })
 }
 

@@ -14,6 +14,7 @@ pub type WebKitScriptWorld = c_void;
 pub type WebKitUserMessage = c_void;
 pub type JSCContext = c_void;
 pub type JSCValue = c_void;
+pub type JSCException = c_void;
 pub type GAsyncResult = c_void;
 
 pub type GAsyncReadyCallback = Option<unsafe extern "C" fn(*mut c_void, *mut GAsyncResult, gpointer)>;
@@ -28,6 +29,7 @@ unsafe extern "C" {
     pub fn webkit_script_world_new_with_name(name: *const c_char) -> *mut WebKitScriptWorld;
 
     pub fn webkit_frame_get_id(frame: *mut WebKitFrame) -> u64;
+    pub fn webkit_frame_is_main_frame(frame: *mut WebKitFrame) -> gboolean;
     pub fn webkit_frame_get_uri(frame: *mut WebKitFrame) -> *const c_char;
     pub fn webkit_frame_get_js_context_for_script_world(
         frame: *mut WebKitFrame,
@@ -35,6 +37,7 @@ unsafe extern "C" {
     ) -> *mut JSCContext;
 
     pub fn webkit_web_page_get_id(page: *mut WebKitWebPage) -> u64;
+    pub fn webkit_web_page_get_main_frame(page: *mut WebKitWebPage) -> *mut WebKitFrame;
     pub fn webkit_web_page_send_message_to_view(
         page: *mut WebKitWebPage,
         message: *mut WebKitUserMessage,
@@ -50,6 +53,8 @@ unsafe extern "C" {
 
     pub fn webkit_user_message_new(name: *const c_char, parameters: *mut GVariant) -> *mut WebKitUserMessage;
     pub fn webkit_user_message_get_parameters(message: *mut WebKitUserMessage) -> *mut GVariant;
+    pub fn webkit_user_message_get_name(message: *mut WebKitUserMessage) -> *const c_char;
+    pub fn webkit_user_message_send_reply(message: *mut WebKitUserMessage, reply: *mut WebKitUserMessage);
 }
 
 #[link(name = "javascriptcoregtk-4.1")]
@@ -57,6 +62,12 @@ unsafe extern "C" {
     pub fn jsc_context_get_global_object(context: *mut JSCContext) -> *mut JSCValue;
     pub fn jsc_context_throw(context: *mut JSCContext, error_message: *const c_char);
     pub fn jsc_context_evaluate(context: *mut JSCContext, code: *const c_char, length: isize) -> *mut JSCValue;
+    pub fn jsc_context_get_exception(context: *mut JSCContext) -> *mut JSCException;
+    pub fn jsc_context_clear_exception(context: *mut JSCContext);
+    pub fn jsc_exception_get_message(exception: *mut JSCException) -> *const c_char;
+    pub fn jsc_value_is_undefined(value: *mut JSCValue) -> gboolean;
+    pub fn jsc_value_to_json(value: *mut JSCValue, indent: c_uint) -> *mut c_char;
+    pub fn jsc_value_object_has_property(value: *mut JSCValue, name: *const c_char) -> gboolean;
 
     pub fn jsc_value_get_context(value: *mut JSCValue) -> *mut JSCContext;
     pub fn jsc_value_is_string(value: *mut JSCValue) -> gboolean;

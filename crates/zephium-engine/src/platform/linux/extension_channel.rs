@@ -18,7 +18,9 @@ use std::rc::Rc;
 use gtk::glib::prelude::ObjectExt;
 use gtk::glib::ToVariant;
 use webkit2gtk::{UserMessage, UserMessageExt, WebContext, WebContextExt, WebView, WebViewExt};
-use zephium_webext_process::{INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
+use zephium_webext_process::{
+    InitGroup, CONFIG_MESSAGE, CONFIG_REQUEST, EVENT_MESSAGE, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE,
+};
 
 const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 /// Bytes one message may carry. The plugin refuses larger ones in the web
@@ -26,14 +28,25 @@ const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 pub(crate) const MESSAGE_LIMIT: usize = 64 * 1_024;
 const CHANNEL_KEY: &str = "zephium-extension-channel";
 
+/// The runtime's step-by-step log (see host::webext_linux's `trace!`).
+fn trace(line: std::fmt::Arguments) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("webext: {line}");
+    }
+}
+
 type Handler = Rc<dyn Fn(Message)>;
 
-/// What the plugin needs of one enabled extension.
+/// What the plugin needs of one enabled extension: its ID, the info block
+/// its contexts start with (`zephium_webext_linux::info`), the host patterns
+/// the user granted it, and its content scripts
+/// (`zephium_webext_linux::content`).
 #[derive(Clone, Debug)]
 pub(crate) struct ChannelExtension {
     pub(crate) id: String,
-    pub(crate) content_matches: Vec<String>,
-    pub(crate) content_scripts: Vec<String>,
+    pub(crate) info: String,
+    pub(crate) granted: Vec<String>,
+    pub(crate) groups: Vec<InitGroup>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +61,8 @@ pub(crate) enum SenderKind {
 /// dropping it unanswered sends an empty reply, so the sender's callback
 /// still runs.
 pub(crate) struct Message {
+    /// The view whose page sent it: a tab, or one of the extension's own.
+    pub(crate) view: WebView,
     pub(crate) extension_id: String,
     pub(crate) kind: SenderKind,
     pub(crate) frame_id: u64,
@@ -89,13 +104,10 @@ impl Channel {
         *self.handler.borrow_mut() = Some(Rc::new(handler));
     }
 
-    fn init_data(&self) -> gtk::glib::Variant {
-        let extensions: Vec<(String, Vec<String>, Vec<String>)> = self
-            .extensions
-            .borrow()
-            .iter()
-            .map(|e| (e.id.clone(), e.content_matches.clone(), e.content_scripts.clone()))
-            .collect();
+    /// The enabled extensions as the plugin takes them, at startup or later.
+    pub(crate) fn current_data(&self) -> gtk::glib::Variant {
+        let extensions: Vec<zephium_webext_process::InitExtension> =
+            self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
         data
@@ -106,7 +118,7 @@ impl Channel {
     }
 
     /// The plugin's message, if it passes the browser's own checks.
-    fn accept(&self, message: &UserMessage) -> Option<Message> {
+    fn accept(&self, view: &WebView, message: &UserMessage) -> Option<Message> {
         let (extension_id, kind, frame_id, body) =
             message.parameters()?.get::<(String, String, u64, String)>()?;
         let kind = match kind.as_str() {
@@ -117,7 +129,7 @@ impl Channel {
         if body.len() > MESSAGE_LIMIT || !self.enabled(&extension_id) {
             return None;
         }
-        Some(Message { extension_id, kind, frame_id, body, pending: Some(message.clone()) })
+        Some(Message { view: view.clone(), extension_id, kind, frame_id, body, pending: Some(message.clone()) })
     }
 }
 
@@ -137,7 +149,7 @@ pub(crate) fn attach(context: &WebContext) -> Option<Rc<Channel>> {
     let channel = Rc::new(Channel::default());
     let starting = channel.clone();
     context.connect_initialize_web_extensions(move |context| {
-        context.set_web_extensions_initialization_user_data(&starting.init_data());
+        context.set_web_extensions_initialization_user_data(&starting.current_data());
     });
     // SAFETY: this private key is written and read only as `Rc<Channel>`
     // here, and lives exactly as long as the context GLib object.
@@ -152,11 +164,19 @@ pub(crate) fn channel(context: &WebContext) -> Option<Rc<Channel>> {
 
 /// Deliver messages the plugin sends from `view`'s pages to `channel`.
 pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
-    view.connect_user_message_received(move |_, message| {
+    view.connect_user_message_received(move |view, message| {
+        // A process WebKit started earlier asks for the current list.
+        if message.name().as_deref() == Some(CONFIG_REQUEST) {
+            trace(format_args!("{:?} asked for the extension list", view.uri()));
+            message.send_reply(&UserMessage::new(CONFIG_REQUEST, Some(&channel.current_data())));
+            return true;
+        }
         if message.name().as_deref() != Some(SEND_MESSAGE) {
             return false;
         }
-        let Some(accepted) = channel.accept(message) else {
+        trace(format_args!("{:?} sends to the browser", view.uri()));
+        let Some(accepted) = channel.accept(view, message) else {
+            trace(format_args!("refused a message from {:?}", view.uri()));
             // Refused: no reply with content, and nothing acts on it.
             message.send_reply(&UserMessage::new("reply", None));
             return true;
@@ -167,6 +187,30 @@ pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
         }
         true
     });
+}
+
+/// Raise an event in `extension_id`'s worlds in `view`'s page: one frame, or
+/// all of them for frame 0. `counted` learns how many listeners got it (0 when
+/// the page could not be reached).
+pub(crate) fn raise(view: &WebView, extension_id: &str, frame_id: u64, body: &str, counted: impl FnOnce(u32) + 'static) {
+    let event = UserMessage::new(EVENT_MESSAGE, Some(&(extension_id, frame_id, body).to_variant()));
+    let target = view.uri();
+    view.send_message_to_page(&event, None::<&gtk::gio::Cancellable>, move |reply| {
+        let count = match reply {
+            Ok(reply) => reply.parameters().and_then(|parameters| parameters.get::<(u32,)>()).map_or(0, |(count,)| count),
+            Err(error) => {
+                trace(format_args!("event to {target:?} was not taken: {error}"));
+                0
+            }
+        };
+        counted(count);
+    });
+}
+
+/// Give `view`'s page the current enabled extensions.
+pub(crate) fn configure_page(view: &WebView, data: &gtk::glib::Variant) {
+    let message = UserMessage::new(CONFIG_MESSAGE, Some(data));
+    view.send_message_to_page(&message, None::<&gtk::gio::Cancellable>, |_| {});
 }
 
 /// `<binary>/../lib/app.zephium/webext` as packaged, or `<binary>/webext` in a

@@ -166,6 +166,9 @@ windows-numerics = "0.2"
 gtk = "0.18"
 webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 zephium-webext-process = { path = "../zephium-webext-process" }
+zephium-webext = { path = "../zephium-webext" }
+zephium-webext-linux = { path = "../zephium-webext-linux" }
+soup3 = "0.5"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 block2 = "0.6"

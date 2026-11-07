@@ -148,6 +148,11 @@ impl EngineHost {
             self.windows_extensions
                 .navigation_grants(partition.profile()),
         );
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let event_permit = event_permit.with_extensions(
+            self.linux_extensions
+                .navigation_grants(partition.profile()),
+        );
         // Restored and explicitly opened tabs need the same live profile grant
         // as native child adoption, before either fresh or spare construction.
         if !event_permit.allows_navigation(url) {
@@ -414,6 +419,11 @@ impl EngineHost {
         #[cfg(target_os = "windows")]
         let event_permit = event_permit.with_extensions(
             self.windows_extensions
+                .navigation_grants(partition.profile()),
+        );
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let event_permit = event_permit.with_extensions(
+            self.linux_extensions
                 .navigation_grants(partition.profile()),
         );
         let target_resource_class = purpose.resource_class();
@@ -2470,6 +2480,12 @@ impl EngineHost {
                 event_permit.emit(&self.sink, EngineEvent::ViewCreationFailed { id: id.get() });
             }
             return None;
+        }
+        // A persistent profile's views are where its extensions' pages are
+        // served from and where their content scripts run.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if !matches!(partition, Partition::Ephemeral(_)) {
+            self.linux_extensions_view_ready(partition.profile(), &view);
         }
         // Native hardening and profile-storage attestation must precede
         // content-policy registration, while registration must precede every

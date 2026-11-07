@@ -20,13 +20,13 @@ use zephium_core::ids::ProfileId;
 use crate::{authorize, shutdown_started, CallerPolicy};
 
 pub(crate) struct WebExtensions {
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), allow(dead_code))]
     root: PathBuf,
-    #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+    #[cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), allow(dead_code))]
     state: Mutex<Option<Pending>>,
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), allow(dead_code))]
 struct Pending {
     /// Single-use approval for this exact package and destination profile.
     review_id: String,
@@ -39,7 +39,7 @@ struct Pending {
 }
 
 /// What a package was installed from, kept to rebuild it later.
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), allow(dead_code))]
 enum Original {
     Crx(Vec<u8>),
     Zip(Vec<u8>),
@@ -64,7 +64,7 @@ struct Registry {
     extensions: Vec<Entry>,
 }
 
-#[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", target_os = "windows", target_os = "linux")), allow(dead_code))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Entry {
     install: String,
@@ -165,9 +165,9 @@ impl WebExtensions {
 
     /// How many are enabled and how many are installed, for a bug report.
     pub(crate) fn counts(&self) -> (usize, usize) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         return imp::counts(self);
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         (0, 0)
     }
 
@@ -176,7 +176,7 @@ impl WebExtensions {
         if let Some(data_dir) = self.root.parent() {
             remove_previous_repository(data_dir);
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         {
             let root = self.root.clone();
             let callback = shell.callback_handle();
@@ -189,7 +189,7 @@ impl WebExtensions {
             });
             imp::start_updates(&self.root, shell);
         }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         let _ = shell;
     }
 }
@@ -247,13 +247,13 @@ fn unseal(path: &Path) {
 
 const UNAVAILABLE: &str = "Extensions are unavailable in this build.";
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 static PUBLICATION_JOBS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 struct PublicationSlot<'a>(&'a std::sync::atomic::AtomicUsize);
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl<'a> PublicationSlot<'a> {
     fn acquire(jobs: &'a std::sync::atomic::AtomicUsize) -> Result<Self, String> {
         jobs.fetch_update(
@@ -266,14 +266,14 @@ impl<'a> PublicationSlot<'a> {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl Drop for PublicationSlot<'_> {
     fn drop(&mut self) {
         self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 async fn publication(
     work: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> Result<(), String> {
@@ -281,7 +281,7 @@ async fn publication(
     publication_reserved(slot, work).await
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 async fn publication_reserved(
     slot: PublicationSlot<'static>,
     work: impl FnOnce() -> Result<(), String> + Send + 'static,
@@ -295,7 +295,7 @@ async fn publication_reserved(
     .map_err(|_| "Extension state is unavailable.".to_owned())?
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn take_pending_for_publication<'a>(
     extensions: &WebExtensions,
     id: &str,
@@ -323,9 +323,9 @@ pub(crate) async fn web_extension_prepare(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::prepare(&shell, &extensions, &tab_id).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, tab_id);
         Err(UNAVAILABLE.into())
@@ -395,7 +395,7 @@ pub(crate) async fn web_extension_confirm(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         // Freeze the exact managed review before queueing blocking work: a
         // newer review may replace the slot while publication is waiting.
@@ -426,7 +426,7 @@ pub(crate) async fn web_extension_confirm(
         })
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id, review_id);
         Err(UNAVAILABLE.into())
@@ -481,9 +481,9 @@ pub(crate) async fn web_extension_list(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_list") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::list(&shell, &extensions).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions);
         Err(UNAVAILABLE.into())
@@ -502,9 +502,9 @@ pub(crate) async fn web_extension_set_enabled(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_enabled") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::set_enabled(&shell, &extensions, &id, enabled).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id, enabled);
         Err(UNAVAILABLE.into())
@@ -524,9 +524,9 @@ pub(crate) async fn web_extension_set_pinned(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_pinned") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::set_pinned(&shell, &extensions, &id, pinned).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id, pinned);
         Err(UNAVAILABLE.into())
@@ -548,7 +548,7 @@ pub(crate) async fn web_extension_retry(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::retry(
         &shell,
         &extensions,
@@ -556,7 +556,7 @@ pub(crate) async fn web_extension_retry(
         zephium_core::ids::ExtensionInstallId::parse(&install_id).ok_or("Invalid installation.")?,
     )
     .await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, profile_id, install_id);
         Err(UNAVAILABLE.into())
@@ -569,7 +569,7 @@ pub(crate) fn access_removed(
     app: &tauri::AppHandle,
     removal: zephium_ipc::WebExtensionAccessRemovalView,
 ) {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         let app = app.clone();
         tauri::async_runtime::spawn(async move {
@@ -583,7 +583,7 @@ pub(crate) fn access_removed(
             }
         });
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let _ = (app, removal);
 }
 
@@ -600,7 +600,7 @@ pub(crate) async fn web_extension_answer_access(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_answer_access") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     {
         let app = caller.app_handle().clone();
         let shell = shell.inner().clone();
@@ -617,7 +617,7 @@ pub(crate) async fn web_extension_answer_access(
         })
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, request, allowed);
         Err(UNAVAILABLE.into())
@@ -635,9 +635,9 @@ pub(crate) async fn web_extension_uninstall(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_uninstall") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::uninstall(&shell, &extensions, &id).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -659,9 +659,9 @@ pub(crate) async fn web_extension_set_access(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_set_access") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::set_access(&shell, &extensions, &id, &mode, sites).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id, mode, sites);
         Err(UNAVAILABLE.into())
@@ -678,9 +678,9 @@ pub(crate) async fn web_extension_open_options(
     if !authorize(&caller, CallerPolicy::Main, "web_extension_open_options") {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::open_options(&shell, &id).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, id);
         Err(UNAVAILABLE.into())
@@ -703,9 +703,9 @@ pub(crate) async fn web_extension_choose_file(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::choose_file(caller.app_handle(), &shell, &extensions, folder).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, folder);
         Err(UNAVAILABLE.into())
@@ -726,9 +726,9 @@ pub(crate) async fn web_extension_prepare_file(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::prepare_file(&shell, &extensions, PathBuf::from(path)).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, path);
         Err(UNAVAILABLE.into())
@@ -750,9 +750,9 @@ pub(crate) async fn web_extension_review_update(
     {
         return Err(UNAVAILABLE.into());
     }
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
     return imp::review_update(&shell, &extensions, &id).await;
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = (shell, extensions, id);
         Err(UNAVAILABLE.into())
@@ -766,13 +766,13 @@ pub(crate) fn dropped_package(paths: &[PathBuf]) -> Option<String> {
         return None;
     };
     let package = match path.extension().and_then(|extension| extension.to_str()) {
-        Some("crx" | "zip") => path.is_file(),
+        Some("crx" | "zip" | "xpi") => path.is_file(),
         _ => path.join("manifest.json").is_file(),
     };
     package.then(|| path.to_string_lossy().into_owned())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 mod imp;
 
 #[cfg(all(test, unix))]
@@ -796,7 +796,7 @@ mod tests {
     }
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod publication_tests {
     #[test]
     fn publication_capacity_is_bounded_and_returns_after_drop_or_panic() {
@@ -865,12 +865,12 @@ mod publication_tests {
     }
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn restore_in_background(work: impl FnOnce() + Send + 'static) {
     tauri::async_runtime::spawn_blocking(work);
 }
 
-#[cfg(all(test, any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(test, any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[test]
 fn startup_restore_never_waits_for_package_preparation() {
     let (release, blocked) = std::sync::mpsc::sync_channel(1);

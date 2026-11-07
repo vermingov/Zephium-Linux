@@ -10,11 +10,15 @@ use crate::manifest::Manifest;
 pub enum Platform {
     Macos,
     Windows,
+    Linux,
 }
 
 const MAC: u8 = 1;
 const WIN: u8 = 2;
-const BOTH: u8 = MAC | WIN;
+/// The Linux port's own runtime, which has none of either platform's gaps
+/// filled yet.
+const LIN: u8 = 4;
+const ALL: u8 = MAC | WIN | LIN;
 
 enum Uses {
     /// An API permission; a trailing `.` matches the whole family.
@@ -31,102 +35,102 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (
         &[Permission("sidePanel"), Key("side_panel")],
         "Can't show its side panel",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("devtools_page")],
         "Developer tools panels aren't available",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.newtab")],
         "Can't replace the new tab page",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.history")],
         "Can't replace the history page",
-        BOTH,
+        ALL,
     ),
     (
         &[Key("chrome_url_overrides.bookmarks")],
         "Can't replace the bookmarks page",
-        BOTH,
+        ALL,
     ),
     (
         &[Permission("nativeMessaging")],
         "Can't talk to apps on your computer (native messaging)",
-        WIN,
+        WIN | LIN,
     ),
     (
         &[Permission("webRequestBlocking")],
         "Can't block requests the old way (webRequestBlocking)",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("tabGroups")], "Can't manage tab groups", MAC),
+    (&[Permission("tabGroups")], "Can't manage tab groups", MAC | LIN),
     (
         &[Permission("readingList")],
         "Can't use the reading list",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("userScripts")], "Can't run user scripts", MAC),
+    (&[Permission("userScripts")], "Can't run user scripts", MAC | LIN),
     (
         &[Permission("debugger")],
         "Can't use the page debugger",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("proxy")], "Can't change proxy settings", MAC),
+    (&[Permission("proxy")], "Can't change proxy settings", MAC | LIN),
     (
         &[Permission("tts"), Permission("ttsEngine")],
         "Can't use text to speech",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("fontSettings")],
         "Can't change font settings",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("search")],
         "Can't search with the browser's search engine",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("pageCapture")],
         "Can't save pages as MHTML",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("desktopCapture")],
         "Can't capture your screen",
-        MAC,
+        MAC | LIN,
     ),
-    (&[Permission("geolocation")], "Can't use your location", MAC),
-    (&[Permission("gcm")], "Can't receive push messages", MAC),
+    (&[Permission("geolocation")], "Can't use your location", MAC | LIN),
+    (&[Permission("gcm")], "Can't receive push messages", MAC | LIN),
     (
         &[Permission("management")],
         "Can't see or manage other extensions",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("privacy")],
         "Can only change password and autofill privacy settings",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Key("oauth2")],
         "Can't sign in with a Google account (identity.getAuthToken)",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("enterprise.")],
         "Enterprise features aren't available",
-        MAC,
+        MAC | LIN,
     ),
     (
         &[Permission("system.")],
         "Can't read system information",
-        MAC,
+        MAC | LIN,
     ),
 ];
 
@@ -136,6 +140,7 @@ pub fn limitations(manifest: &Manifest, permissions: &[String], platform: Platfo
     let bit = match platform {
         Platform::Macos => MAC,
         Platform::Windows => WIN,
+        Platform::Linux => LIN,
     };
     GAPS.iter()
         .filter(|(uses, _, platforms)| {

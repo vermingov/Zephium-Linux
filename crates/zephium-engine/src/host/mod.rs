@@ -76,6 +76,8 @@ mod webext;
 mod webext_downloads;
 #[cfg(target_os = "windows")]
 mod webext_windows;
+#[cfg(all(unix, not(target_os = "macos")))]
+mod webext_linux;
 #[cfg(all(
     feature = "agentic-browser",
     any(target_os = "macos", target_os = "windows")
@@ -715,6 +717,8 @@ pub(crate) struct EngineHost {
     scriptlets: scriptlets::Scriptlets,
     #[cfg(target_os = "windows")]
     windows_extensions: webext_windows::WindowsExtensions,
+    #[cfg(all(unix, not(target_os = "macos")))]
+    linux_extensions: webext_linux::LinuxExtensions,
     // Off-screen views, and the subset the shell's idle policy asked WebView2
     // to suspend.
     #[cfg(target_os = "windows")]
