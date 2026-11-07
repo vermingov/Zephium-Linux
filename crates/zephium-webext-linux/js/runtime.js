@@ -329,6 +329,19 @@
         },
         insertCSS: undefined, removeCSS: undefined,
       }),
+      declarativeNetRequest: Object.assign(namespace("declarativeNetRequest", {
+        getEnabledRulesets: undefined, updateEnabledRulesets: undefined,
+        getDynamicRules: undefined, updateDynamicRules: undefined,
+        getSessionRules: undefined, updateSessionRules: undefined,
+        isRegexSupported: undefined, getAvailableStaticRuleCount: undefined,
+        getDisabledRuleIds: undefined, updateStaticRules: undefined,
+        getMatchedRules: undefined, setExtensionActionOptions: undefined,
+      }, ["onRuleMatchedDebug"]), {
+        MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50, MAX_NUMBER_OF_STATIC_RULESETS: 100,
+        MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_SESSION_RULES: 5000,
+        MAX_NUMBER_OF_REGEX_RULES: 1000, GUARANTEED_MINIMUM_STATIC_RULES: 30000,
+        DYNAMIC_RULESET_ID: "_dynamic", SESSION_RULESET_ID: "_session",
+      }),
       alarms: namespace("alarms", {
         create: undefined, get: undefined, getAll: undefined, clear: undefined, clearAll: undefined,
       }, ["onAlarm"]),

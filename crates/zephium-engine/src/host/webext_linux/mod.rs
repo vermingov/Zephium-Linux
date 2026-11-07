@@ -9,6 +9,7 @@
 
 mod action;
 mod api;
+mod dnr;
 mod events;
 mod routing;
 mod scheme;
@@ -94,6 +95,7 @@ pub(super) struct Install {
     pub(super) hosts: Vec<String>,
     pub(super) background: Option<WebView>,
     pub(super) storage: api::Storage,
+    pub(super) dnr: dnr::Rules,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -151,6 +153,7 @@ impl Install {
             permissions: load.permissions.clone(),
             hosts: load.match_patterns.clone(),
             background: None,
+            dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
@@ -187,6 +190,7 @@ impl super::EngineHost {
             loaded
         });
         self.linux_extensions_sync(profile);
+        self.linux_dnr_rebuild(profile, &load.extension_id);
         self.sink.emit(EngineEvent::WebExtensionSettled { profile, install: load.install, result });
         self.sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
     }
@@ -220,8 +224,6 @@ impl super::EngineHost {
         self.linux_request_tab(profile, Some(url), true);
     }
 
-    /// A view of `profile` passed its security configuration: the profile's
-    /// context now serves extension pages and carries the plugin.
     /// A Firefox add-on file the person downloaded from addons.mozilla.org
     /// is saved at `path`: the shell offers it for review.
     pub(crate) fn addon_downloaded(&mut self, profile: ProfileId, path: PathBuf) {
@@ -229,6 +231,8 @@ impl super::EngineHost {
         self.sink.emit(EngineEvent::WebExtensionPackageFetched { profile, path });
     }
 
+    /// A view of `profile` passed its security configuration: the profile's
+    /// context now serves extension pages and carries the plugin.
     pub(super) fn linux_extensions_view_ready(&mut self, profile: ProfileId, view: &wry::WebView) {
         let Some(context) = view.webview().context() else {
             return;
@@ -277,6 +281,7 @@ impl super::EngineHost {
         }
         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
         self.linux_extensions.set_navigation(profile, ids);
+        self.linux_dnr_sync(profile);
     }
 
     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {
@@ -284,6 +289,9 @@ impl super::EngineHost {
         let mut removed = state.installs.remove(&install)?;
         removed.stop();
         state.routing.forget_extension(&removed.extension_id);
+        if let Some(policy) = removed.dnr.applied.take() {
+            self.linux_dnr_remove(profile, &policy);
+        }
         Some(removed)
     }
 

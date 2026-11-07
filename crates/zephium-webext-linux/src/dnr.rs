@@ -38,6 +38,11 @@ pub fn translate(rules: &[Value]) -> (String, usize) {
     (Value::Array(list).to_string(), skipped)
 }
 
+/// `isRegexSupported`: whether WebKit can compile `regex`.
+pub fn regex_supported(regex: &str) -> bool {
+    regex_filter(regex).is_some()
+}
+
 /// One DNR rule as one or more WebKit rules (one per request domain).
 fn translate_rule(rule: &Value) -> Option<Vec<Value>> {
     let condition = &rule["condition"];

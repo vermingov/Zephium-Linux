@@ -197,6 +197,7 @@ impl super::super::EngineHost {
                 _ => unsupported(api),
             },
             "storage" => self.linux_storage(profile, extension_id, method, args),
+            "declarativeNetRequest" => self.linux_dnr(profile, extension_id, method, args),
             "tabs" => self.linux_tabs(profile, message, from, method, args),
             "windows" => self.linux_windows(profile, message, method, args),
             "action" => self.linux_action_call(profile, extension_id, method, args),

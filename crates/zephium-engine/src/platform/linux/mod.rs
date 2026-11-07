@@ -17,6 +17,7 @@ pub(crate) fn open_external_app(_url: &str) -> bool {
 }
 
 pub(crate) use content_filter::{
+    add_to_view as add_content_policy_to_view, remove_from_view as remove_content_policy_from_view,
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
     install_scoped_on_view as install_scoped_content_policy_on_view,
     remove_content_policy_cache_identifier, same_policy as same_content_policy,
