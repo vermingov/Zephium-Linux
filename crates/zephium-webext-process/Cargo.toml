@@ -1,0 +1,17 @@
+[package]
+name = "zephium-webext-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WebKitGTK web-process plugin: the only channel between extension code and Zephium on Linux"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+glib = "0.18"
+
+[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
+gtk = "0.18"
+webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
