@@ -8,7 +8,7 @@ use std::path::Path;
 
 use gtk::prelude::*;
 use serde_json::{json, Value};
-use webkit2gtk::{WebView, WebViewExt};
+use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebView, WebViewExt};
 use zephium_core::extensions::{
     ExtensionActionIcon, ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRevision, ExtensionActionScope,
     ExtensionActionSettlement, ExtensionActionSnapshot, ExtensionActionSnapshotSettlement, ExtensionActionState,
@@ -290,6 +290,13 @@ fn open_popup(
 ) -> Popup {
     let view = WebView::with_context(context);
     view.set_size_request(POPUP_SIZE.0, POPUP_SIZE.1);
+    // GPU compositing has no surface inside a GTK3 popover: the view drew
+    // black and stopped the window's other views from redrawing. Software
+    // rendering is plenty for a popup page.
+    if let Some(settings) = WebViewExt::settings(&view) {
+        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+    }
+    view.set_background_color(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
     extension_channel::listen(&view, channel);
     let popover = gtk::Popover::new(Some(parent));
     popover.set_pointing_to(&gtk::gdk::Rectangle::new(anchor.x as i32, anchor.y as i32, anchor.width.max(1.0) as i32, anchor.height.max(1.0) as i32));
