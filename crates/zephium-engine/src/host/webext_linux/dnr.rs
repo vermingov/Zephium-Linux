@@ -312,6 +312,16 @@ impl super::super::EngineHost {
         }
     }
 
+    /// Every installed extension's list on a tab being built.
+    pub(super) fn linux_dnr_add_to(&self, profile: ProfileId, view: &webkit2gtk::WebView) {
+        let Some(state) = self.linux_extensions.profiles.get(&profile) else {
+            return;
+        };
+        for policy in state.installs.values().filter_map(|install| install.dnr.applied.as_ref()) {
+            add_content_policy_to_view(view, policy);
+        }
+    }
+
     /// An extension stops: its list comes off the profile's tabs.
     pub(super) fn linux_dnr_remove(&self, profile: ProfileId, policy: &NativeContentPolicy) {
         for view in self.linux_tab_views(profile) {

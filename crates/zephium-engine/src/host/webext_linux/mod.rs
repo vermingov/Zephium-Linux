@@ -263,6 +263,8 @@ impl super::EngineHost {
             state.context = Some(context);
         }
         self.linux_extensions_sync(profile);
+        // The view is not among the profile's tabs until it is built.
+        self.linux_dnr_add_to(profile, &view.webview());
     }
 
     /// Bring the plugin's startup data, the served packages, the background
