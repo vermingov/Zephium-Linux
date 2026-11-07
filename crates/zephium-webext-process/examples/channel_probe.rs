@@ -68,6 +68,7 @@ mod probe {
         vec![(
             ENABLED.to_owned(),
             format!(r#"{{"id":"{ENABLED}"}}"#),
+            vec!["<all_urls>".to_owned()],
             vec![
                 group(page(content), vec![], CONTENT_START, "document_start"),
                 group(page(content), vec![], CONTENT_END, "document_end"),

@@ -3,7 +3,8 @@
 //! Each world registers one listener (`__zephiumWebextListen`). The browser
 //! sends a page the `zephium-webext.event` message naming the extension and
 //! the frame (0 for all of the extension's worlds in the page); the plugin
-//! calls the matching listeners with the event's text.
+//! calls the matching listeners with the event's text and replies with how
+//! many it called, `(u)`, so the browser knows when nobody is listening.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -11,7 +12,8 @@ use std::ffi::{c_void, CStr};
 
 use glib::ffi::gboolean;
 use glib::gobject_ffi::{g_object_ref, g_object_unref, g_signal_connect_data};
-use glib::translate::FromGlibPtrNone;
+use glib::translate::{FromGlibPtrNone, ToGlibPtr};
+use glib::ToVariant;
 
 use crate::channel;
 use crate::ffi::*;
@@ -94,11 +96,11 @@ unsafe extern "C" fn message_received(
         return 0;
     }
     let parameters = webkit_user_message_get_parameters(message);
-    if parameters.is_null() {
-        return 1;
-    }
-    let Some((extension_id, frame_id, body)) = glib::Variant::from_glib_none(parameters).get::<(String, u64, String)>()
-    else {
+    let event = (!parameters.is_null())
+        .then(|| glib::Variant::from_glib_none(parameters))
+        .and_then(|parameters| parameters.get::<(String, u64, String)>());
+    let Some((extension_id, frame_id, body)) = event else {
+        reply_count(message, 0);
         return 1;
     };
     let page_id = webkit_web_page_get_id(page);
@@ -120,5 +122,13 @@ unsafe extern "C" fn message_received(
     for listener in &targets {
         channel::call_with(listener.0, Some(&body));
     }
+    reply_count(message, targets.len() as u32);
     1
+}
+
+unsafe fn reply_count(message: *mut WebKitUserMessage, count: u32) {
+    let name = std::ffi::CString::new(EVENT_MESSAGE).expect("constant has no NUL");
+    let parameters = (count,).to_variant();
+    let reply = webkit_user_message_new(name.as_ptr(), parameters.to_glib_none().0);
+    webkit_user_message_send_reply(message, reply);
 }

@@ -52,6 +52,7 @@ unsafe extern "C" {
     pub fn webkit_user_message_new(name: *const c_char, parameters: *mut GVariant) -> *mut WebKitUserMessage;
     pub fn webkit_user_message_get_parameters(message: *mut WebKitUserMessage) -> *mut GVariant;
     pub fn webkit_user_message_get_name(message: *mut WebKitUserMessage) -> *const c_char;
+    pub fn webkit_user_message_send_reply(message: *mut WebKitUserMessage, reply: *mut WebKitUserMessage);
 }
 
 #[link(name = "javascriptcoregtk-4.1")]

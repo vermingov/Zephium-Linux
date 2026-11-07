@@ -98,6 +98,7 @@ unsafe extern "C" fn main_world_cleared(
         plugin
             .extensions
             .iter()
+            .filter(|(_, extension)| any_matches(&extension.granted, uri))
             .filter_map(|(id, extension)| {
                 let groups: Vec<Group> = extension
                     .groups

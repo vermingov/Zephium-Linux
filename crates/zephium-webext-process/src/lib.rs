@@ -43,14 +43,16 @@ pub const CONTEXT_GLOBAL: &str = "__zephiumWebextContext";
 /// add-ons installed from addons.mozilla.org.
 pub const EXTENSION_SCHEMES: [&str; 2] = ["chrome-extension://", "moz-extension://"];
 /// Initialization data type: the per-message byte limit, then for each
-/// enabled extension its ID, its info block, and its content-script groups:
-/// matches, exclude_matches, scripts, run_at, all_frames.
-pub const INIT_DATA_TYPE: &str = "(ua(ssa(asasassb)))";
+/// enabled extension its ID, its info block, the host patterns the user
+/// granted it, and its content-script groups: matches, exclude_matches,
+/// scripts, run_at, all_frames. A group runs only where both its own matches
+/// and the grant match.
+pub const INIT_DATA_TYPE: &str = "(ua(ssasa(asasassb)))";
 
 /// One `content_scripts` entry as the plugin gets it.
 pub type InitGroup = (Vec<String>, Vec<String>, Vec<String>, String, bool);
 /// One enabled extension as the plugin gets it.
-pub type InitExtension = (String, String, Vec<InitGroup>);
+pub type InitExtension = (String, String, Vec<String>, Vec<InitGroup>);
 
 #[cfg(all(unix, not(target_os = "macos")))]
 mod plugin {
@@ -71,6 +73,7 @@ mod plugin {
 
     pub(crate) struct Extension {
         pub(crate) info: String,
+        pub(crate) granted: Vec<String>,
         pub(crate) groups: Vec<Group>,
         pub(crate) world: worlds::World,
     }
@@ -113,11 +116,11 @@ mod plugin {
         };
         let extensions = enabled
             .into_iter()
-            .filter(|(id, _, _)| is_extension_id(id))
-            .map(|(id, info, groups)| {
+            .filter(|(id, _, _, _)| is_extension_id(id))
+            .map(|(id, info, granted, groups)| {
                 let world = worlds::World::new(&id);
                 let groups = groups.into_iter().map(group).collect();
-                (id, Extension { info, groups, world })
+                (id, Extension { info, granted, groups, world })
             })
             .collect();
         PLUGIN.with(|plugin| {

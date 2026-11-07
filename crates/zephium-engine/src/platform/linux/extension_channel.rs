@@ -18,7 +18,7 @@ use std::rc::Rc;
 use gtk::glib::prelude::ObjectExt;
 use gtk::glib::ToVariant;
 use webkit2gtk::{UserMessage, UserMessageExt, WebContext, WebContextExt, WebView, WebViewExt};
-use zephium_webext_process::{InitGroup, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
+use zephium_webext_process::{InitGroup, EVENT_MESSAGE, INIT_DATA_TYPE, KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
 
 const PLUGIN_FILE: &str = "libzephium_webext_process.so";
 /// Bytes one message may carry. The plugin refuses larger ones in the web
@@ -29,12 +29,14 @@ const CHANNEL_KEY: &str = "zephium-extension-channel";
 type Handler = Rc<dyn Fn(Message)>;
 
 /// What the plugin needs of one enabled extension: its ID, the info block
-/// its contexts start with (`zephium_webext_linux::info`), and its content
-/// scripts (`zephium_webext_linux::content`).
+/// its contexts start with (`zephium_webext_linux::info`), the host patterns
+/// the user granted it, and its content scripts
+/// (`zephium_webext_linux::content`).
 #[derive(Clone, Debug)]
 pub(crate) struct ChannelExtension {
     pub(crate) id: String,
     pub(crate) info: String,
+    pub(crate) granted: Vec<String>,
     pub(crate) groups: Vec<InitGroup>,
 }
 
@@ -50,6 +52,8 @@ pub(crate) enum SenderKind {
 /// dropping it unanswered sends an empty reply, so the sender's callback
 /// still runs.
 pub(crate) struct Message {
+    /// The view whose page sent it: a tab, or one of the extension's own.
+    pub(crate) view: WebView,
     pub(crate) extension_id: String,
     pub(crate) kind: SenderKind,
     pub(crate) frame_id: u64,
@@ -93,7 +97,7 @@ impl Channel {
 
     fn init_data(&self) -> gtk::glib::Variant {
         let extensions: Vec<zephium_webext_process::InitExtension> =
-            self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.groups.clone())).collect();
+            self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
         data
@@ -104,7 +108,7 @@ impl Channel {
     }
 
     /// The plugin's message, if it passes the browser's own checks.
-    fn accept(&self, message: &UserMessage) -> Option<Message> {
+    fn accept(&self, view: &WebView, message: &UserMessage) -> Option<Message> {
         let (extension_id, kind, frame_id, body) =
             message.parameters()?.get::<(String, String, u64, String)>()?;
         let kind = match kind.as_str() {
@@ -115,7 +119,7 @@ impl Channel {
         if body.len() > MESSAGE_LIMIT || !self.enabled(&extension_id) {
             return None;
         }
-        Some(Message { extension_id, kind, frame_id, body, pending: Some(message.clone()) })
+        Some(Message { view: view.clone(), extension_id, kind, frame_id, body, pending: Some(message.clone()) })
     }
 }
 
@@ -150,11 +154,11 @@ pub(crate) fn channel(context: &WebContext) -> Option<Rc<Channel>> {
 
 /// Deliver messages the plugin sends from `view`'s pages to `channel`.
 pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
-    view.connect_user_message_received(move |_, message| {
+    view.connect_user_message_received(move |view, message| {
         if message.name().as_deref() != Some(SEND_MESSAGE) {
             return false;
         }
-        let Some(accepted) = channel.accept(message) else {
+        let Some(accepted) = channel.accept(view, message) else {
             // Refused: no reply with content, and nothing acts on it.
             message.send_reply(&UserMessage::new("reply", None));
             return true;
@@ -164,6 +168,21 @@ pub(crate) fn listen(view: &WebView, channel: Rc<Channel>) {
             handler(accepted);
         }
         true
+    });
+}
+
+/// Raise an event in `extension_id`'s worlds in `view`'s page: one frame, or
+/// all of them for frame 0. `counted` learns how many listeners got it (0 when
+/// the page could not be reached).
+pub(crate) fn raise(view: &WebView, extension_id: &str, frame_id: u64, body: &str, counted: impl FnOnce(u32) + 'static) {
+    let event = UserMessage::new(EVENT_MESSAGE, Some(&(extension_id, frame_id, body).to_variant()));
+    view.send_message_to_page(&event, None::<&gtk::gio::Cancellable>, move |reply| {
+        let count = reply
+            .ok()
+            .and_then(|reply| reply.parameters())
+            .and_then(|parameters| parameters.get::<(u32,)>())
+            .map_or(0, |(count,)| count);
+        counted(count);
     });
 }
 
