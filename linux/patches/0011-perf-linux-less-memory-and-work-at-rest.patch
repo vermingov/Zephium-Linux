@@ -1,0 +1,459 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 14:29:47 +0100
+Subject: [PATCH 11/11] perf(linux): less memory and work at rest
+
+- Fixed malloc thresholds: glibc raised its mmap threshold after the
+  blocker's list compile freed large buffers, so the main process kept
+  about 80 MB it no longer used (210 MB to 130-145 MB after a compile).
+- Memory pressure from GLib's memory monitor (low-memory-monitor or the
+  kernel's PSI): the warm spare view and tighter view limits now apply on
+  Linux. A quiet minute after the last warning reads as normal.
+- Extensions: the full sync runs once per profile, not for every new view
+  (each re-sent every extension's scripts to every tab and re-added every
+  network rule list); the plugin's data is built once per change; a
+  popup's size follower is retired when its page reloads; the trace
+  switch is read once.
+- storage.set/remove skip unchanged values and serialize once.
+---
+ .../src/host/webext_linux/action.rs           | 11 ++-
+ .../src/host/webext_linux/mod.rs              | 19 +++-
+ .../src/platform/linux/extension_channel.rs   | 16 +++-
+ crates/zephium-webext-linux/src/storage.rs    | 54 ++++++++---
+ crates/zephium-webext-process/src/lib.rs      |  8 +-
+ desktop/Cargo.toml                            |  1 +
+ desktop/src/main.rs                           | 17 ++++
+ desktop/src/memory_pressure.rs                | 93 ++++++++++++++++++-
+ 8 files changed, 195 insertions(+), 24 deletions(-)
+
+diff --git a/crates/zephium-engine/src/host/webext_linux/action.rs b/crates/zephium-engine/src/host/webext_linux/action.rs
+index 9862a438..4041e0d5 100644
+--- a/crates/zephium-engine/src/host/webext_linux/action.rs
++++ b/crates/zephium-engine/src/host/webext_linux/action.rs
+@@ -320,7 +320,7 @@ fn open_popup(
+         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
+         // With the trace on, the popup's console goes to the log, as the
+         // background's does.
+-        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++        if super::tracing() {
+             settings.set_enable_write_console_messages_to_stdout(true);
+         }
+     }
+@@ -370,16 +370,21 @@ fn open_popup(
+ 
+     // Once loaded, the popup takes the page's own size, and follows it while
+     // open: a popup's page grows and shrinks as its script draws.
++    // One follower per loaded page: a reload retires the one before it.
+     let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
++    let loads = std::rc::Rc::new(std::cell::Cell::new(0_u64));
+     view.connect_load_changed(move |view, event| {
+         if event != webkit2gtk::LoadEvent::Finished {
+             return;
+         }
+         let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
+         fit_popup(&view, parent.clone(), frame.clone(), anchor);
++        let load = loads.get() + 1;
++        loads.set(load);
++        let current = loads.clone();
+         gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+-            // Closed: the frame left the stage.
+-            if frame.parent().is_none() {
++            // Closed (the frame left the stage), or a newer page follows.
++            if frame.parent().is_none() || current.get() != load {
+                 return gtk::glib::ControlFlow::Break;
+             }
+             fit_popup(&view, parent.clone(), frame.clone(), anchor);
+diff --git a/crates/zephium-engine/src/host/webext_linux/mod.rs b/crates/zephium-engine/src/host/webext_linux/mod.rs
+index 6dd66977..24c0fdfb 100644
+--- a/crates/zephium-engine/src/host/webext_linux/mod.rs
++++ b/crates/zephium-engine/src/host/webext_linux/mod.rs
+@@ -23,9 +23,15 @@ mod scheme;
+ 
+ /// Log one step of the runtime when `ZEPHIUM_WEBEXT_TRACE` is set; silent
+ /// otherwise. For finding where an extension stops working.
++/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
++pub(super) fn tracing() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
++}
++
+ macro_rules! trace {
+     ($($argument:tt)*) => {
+-        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++        if $crate::host::webext_linux::tracing() {
+             eprintln!("webext: {}", format!($($argument)*));
+         }
+     };
+@@ -271,7 +277,8 @@ impl super::EngineHost {
+             return;
+         };
+         let state = self.linux_extensions.profiles.entry(profile).or_default();
+-        if state.context.is_none() {
++        let first = state.context.is_none();
++        if first {
+             scheme::register(&context, &state.packages);
+             if let Some(channel) = extension_channel::channel(&context) {
+                 channel.set_handler(move |message| {
+@@ -285,7 +292,11 @@ impl super::EngineHost {
+             commands::listen(&view.webview(), profile, state.shortcuts.clone());
+             menus::listen(&view.webview(), profile, state.menus.clone());
+         }
+-        self.linux_extensions_sync(profile);
++        // The first view brings the context the backgrounds need. A later
++        // view's page asks for the extension list itself when it is created.
++        if first {
++            self.linux_extensions_sync(profile);
++        }
+         // The view is not among the profile's tabs until it is built.
+         self.linux_dnr_add_to(profile, &view.webview());
+     }
+@@ -361,7 +372,7 @@ fn start_background(context: &WebContext, channel: &Rc<Channel>, install: &Insta
+     trace!("background of {} starts at {url}", install.extension_id);
+     // With the trace on, the page's console (script errors, refused loads)
+     // goes to the log too.
+-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++    if tracing() {
+         if let Some(settings) = WebViewExt::settings(&view) {
+             settings.set_enable_write_console_messages_to_stdout(true);
+         }
+diff --git a/crates/zephium-engine/src/platform/linux/extension_channel.rs b/crates/zephium-engine/src/platform/linux/extension_channel.rs
+index e411e001..4dc5e545 100644
+--- a/crates/zephium-engine/src/platform/linux/extension_channel.rs
++++ b/crates/zephium-engine/src/platform/linux/extension_channel.rs
+@@ -29,8 +29,14 @@ pub(crate) const MESSAGE_LIMIT: usize = 64 * 1_024;
+ const CHANNEL_KEY: &str = "zephium-extension-channel";
+ 
+ /// The runtime's step-by-step log (see host::webext_linux's `trace!`).
++/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
++fn tracing() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
++}
++
+ fn trace(line: std::fmt::Arguments) {
+-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++    if tracing() {
+         eprintln!("webext: {line}");
+     }
+ }
+@@ -91,6 +97,9 @@ impl Drop for Message {
+ #[derive(Default)]
+ pub(crate) struct Channel {
+     extensions: RefCell<Vec<ChannelExtension>>,
++    /// `extensions` as the plugin takes them, built once per change: every
++    /// new page asks for it.
++    data: RefCell<Option<gtk::glib::Variant>>,
+     handler: RefCell<Option<Handler>>,
+ }
+ 
+@@ -98,6 +107,7 @@ impl Channel {
+     /// Web processes started from now on get `extensions`.
+     pub(crate) fn set_extensions(&self, extensions: Vec<ChannelExtension>) {
+         *self.extensions.borrow_mut() = extensions;
++        self.data.take();
+     }
+ 
+     pub(crate) fn set_handler(&self, handler: impl Fn(Message) + 'static) {
+@@ -106,10 +116,14 @@ impl Channel {
+ 
+     /// The enabled extensions as the plugin takes them, at startup or later.
+     pub(crate) fn current_data(&self) -> gtk::glib::Variant {
++        if let Some(data) = self.data.borrow().as_ref() {
++            return data.clone();
++        }
+         let extensions: Vec<zephium_webext_process::InitExtension> =
+             self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
+         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
+         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
++        *self.data.borrow_mut() = Some(data.clone());
+         data
+     }
+ 
+diff --git a/crates/zephium-webext-linux/src/storage.rs b/crates/zephium-webext-linux/src/storage.rs
+index 39202e1d..935e5c8b 100644
+--- a/crates/zephium-webext-linux/src/storage.rs
++++ b/crates/zephium-webext-linux/src/storage.rs
+@@ -53,20 +53,25 @@ impl Area {
+     }
+ 
+     pub fn set(&mut self, items: Map<String, Value>, quota: Option<usize>) -> Result<Changes, String> {
+-        let mut next = self.items.clone();
++        // Copied only once something changes: extensions often write what
++        // they already stored.
++        let mut next: Option<Map<String, Value>> = None;
+         let mut changes = Changes::new();
+         for (key, value) in items {
+-            let old = next.insert(key.clone(), value.clone());
+-            if old.as_ref() != Some(&value) {
+-                changes.insert(key, change(old, Some(value)));
++            if self.items.get(&key) == Some(&value) {
++                continue;
+             }
++            let old = next.get_or_insert_with(|| self.items.clone()).insert(key.clone(), value.clone());
++            changes.insert(key, change(old, Some(value)));
+         }
+-        if let Some(quota) = quota {
+-            if Value::Object(next.clone()).to_string().len() > quota {
+-                return Err("QUOTA_BYTES quota exceeded".into());
+-            }
++        let Some(next) = next else {
++            return Ok(changes);
++        };
++        let text = serialize(&next)?;
++        if quota.is_some_and(|quota| text.len() > quota) {
++            return Err("QUOTA_BYTES quota exceeded".into());
+         }
+-        self.commit(next)?;
++        self.commit(next, text)?;
+         Ok(changes)
+     }
+ 
+@@ -76,18 +81,25 @@ impl Area {
+             Value::Array(list) => list.iter().filter_map(Value::as_str).collect(),
+             _ => Vec::new(),
+         };
++        if !keys.iter().any(|key| self.items.contains_key(*key)) {
++            return Ok(Changes::new());
++        }
+         let mut next = self.items.clone();
+         let changes = keys
+             .into_iter()
+             .filter_map(|key| next.remove(key).map(|old| (key.to_owned(), change(Some(old), None))))
+             .collect();
+-        self.commit(next)?;
++        let text = serialize(&next)?;
++        self.commit(next, text)?;
+         Ok(changes)
+     }
+ 
+     pub fn clear(&mut self) -> Result<Changes, String> {
++        if self.items.is_empty() {
++            return Ok(Changes::new());
++        }
+         let changes = self.items.iter().map(|(key, old)| (key.clone(), change(Some(old.clone()), None))).collect();
+-        self.commit(Map::new())?;
++        self.commit(Map::new(), b"{}".to_vec())?;
+         Ok(changes)
+     }
+ 
+@@ -102,13 +114,13 @@ impl Area {
+     }
+ 
+     /// Write first, then keep: a failed write leaves the area as it was.
+-    fn commit(&mut self, next: Map<String, Value>) -> Result<(), String> {
++    fn commit(&mut self, next: Map<String, Value>, text: Vec<u8>) -> Result<(), String> {
+         if let Some(file) = &self.file {
+             if let Some(parent) = file.parent() {
+                 fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+             }
+             let staged = file.with_extension("json.new");
+-            fs::write(&staged, Value::Object(next.clone()).to_string()).map_err(|error| error.to_string())?;
++            fs::write(&staged, text).map_err(|error| error.to_string())?;
+             fs::rename(&staged, file).map_err(|error| error.to_string())?;
+         }
+         self.items = next;
+@@ -116,6 +128,10 @@ impl Area {
+     }
+ }
+ 
++fn serialize(items: &Map<String, Value>) -> Result<Vec<u8>, String> {
++    serde_json::to_vec(items).map_err(|error| error.to_string())
++}
++
+ fn change(old: Option<Value>, new: Option<Value>) -> Value {
+     let mut change = json!({});
+     if let Some(old) = old {
+@@ -170,4 +186,16 @@ mod tests {
+         Area::on_disk(file.clone()).unwrap().set(object(json!({"k": "v"})), None).unwrap();
+         assert_eq!(Value::Object(Area::on_disk(file).unwrap().get(&Value::Null)), json!({"k": "v"}));
+     }
++
++    #[test]
++    fn unchanged_writes_leave_the_file_alone() {
++        let dir = tempfile::tempdir().unwrap();
++        let file = dir.path().join("local.json");
++        let mut area = Area::on_disk(file.clone()).unwrap();
++        area.set(object(json!({"k": "v"})), None).unwrap();
++        std::fs::remove_file(&file).unwrap();
++        assert!(area.set(object(json!({"k": "v"})), None).unwrap().is_empty());
++        assert!(area.remove(&json!("missing")).unwrap().is_empty());
++        assert!(!file.exists());
++    }
+ }
+diff --git a/crates/zephium-webext-process/src/lib.rs b/crates/zephium-webext-process/src/lib.rs
+index f5af5197..a1216e59 100644
+--- a/crates/zephium-webext-process/src/lib.rs
++++ b/crates/zephium-webext-process/src/lib.rs
+@@ -14,8 +14,14 @@
+ /// The runtime's step-by-step log in the web process, when the browser runs
+ /// with `ZEPHIUM_WEBEXT_TRACE` set and WebKit passes it on.
+ #[cfg(all(unix, not(target_os = "macos")))]
++/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
++fn tracing() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
++}
++
+ pub(crate) fn trace(line: std::fmt::Arguments) {
+-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++    if tracing() {
+         eprintln!("webext plugin: {line}");
+     }
+ }
+diff --git a/desktop/Cargo.toml b/desktop/Cargo.toml
+index 96639d8a..47df1bd6 100644
+--- a/desktop/Cargo.toml
++++ b/desktop/Cargo.toml
+@@ -178,6 +178,7 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+ 
+ [target.'cfg(target_os = "linux")'.dependencies]
+ zephium-work-composition = { workspace = true, optional = true }
++libc = "0.2"
+ async-io = "=2.6.0"
+ futures-lite = "=2.6.1"
+ x11rb = { version = "=0.13.2", features = ["xkb"] }
+diff --git a/desktop/src/main.rs b/desktop/src/main.rs
+index 2ed34758..0b9904bf 100644
+--- a/desktop/src/main.rs
++++ b/desktop/src/main.rs
+@@ -5,6 +5,8 @@
+ )]
+ 
+ fn main() -> std::process::ExitCode {
++    #[cfg(all(target_os = "linux", target_env = "gnu"))]
++    fixed_malloc_thresholds();
+     #[cfg(all(target_os = "macos", feature = "work-product"))]
+     zephium_app::work_commands::private_guard_main();
+     #[cfg(all(target_os = "macos", feature = "work-integration-qa", debug_assertions))]
+@@ -102,3 +104,18 @@ fn main() -> std::process::ExitCode {
+     zephium_desktop_lib::run();
+     std::process::ExitCode::SUCCESS
+ }
++
++/// glibc raises its mmap threshold each time a large block is freed, up to
++/// 32 MB. Compiling the blocker lists frees many such buffers, so later large
++/// buffers come from the heap and stay there: about 80 MB more resident after
++/// every list compile. Fixed thresholds keep large blocks in mmap, returned to
++/// the system when freed.
++#[cfg(all(target_os = "linux", target_env = "gnu"))]
++fn fixed_malloc_thresholds() {
++    const THRESHOLD: libc::c_int = 256 * 1024;
++    // SAFETY: mallopt only changes allocator tuning; called before any thread.
++    unsafe {
++        libc::mallopt(libc::M_MMAP_THRESHOLD, THRESHOLD);
++        libc::mallopt(libc::M_TRIM_THRESHOLD, THRESHOLD);
++    }
++}
+diff --git a/desktop/src/memory_pressure.rs b/desktop/src/memory_pressure.rs
+index f7442cac..855baea9 100644
+--- a/desktop/src/memory_pressure.rs
++++ b/desktop/src/memory_pressure.rs
+@@ -1,6 +1,5 @@
+ //! OS-driven residency input. No process sampling; only a critically low
+ //! state on Windows is read again periodically, to notice it easing.
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
+ use tauri::Manager;
+ 
+ pub(crate) fn install(app: &tauri::AppHandle) {
+@@ -10,10 +9,100 @@ pub(crate) fn install(app: &tauri::AppHandle) {
+             app.manage(monitor);
+         }
+     }
+-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
++    #[cfg(target_os = "linux")]
++    if let Some(shell) = app.try_state::<zephium_app::Handle>() {
++        linux::install(shell.inner().clone());
++    }
++    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+     let _ = app;
+ }
+ 
++/// GLib's memory monitor: the low-memory-monitor daemon or the kernel's
++/// pressure stall information. It only ever warns, so a quiet spell of
++/// `EASE_SECONDS` after the last warning reads as normal again.
++#[cfg(target_os = "linux")]
++mod linux {
++    use std::cell::{Cell, RefCell};
++    use std::time::{Duration, Instant};
++
++    use gtk::glib::translate::FromGlibPtrFull;
++    use gtk::glib::{self, gobject_ffi, ObjectExt};
++    use zephium_app::{Command, Handle};
++    use zephium_core::ports::engine::MemoryPressure;
++
++    const EASE_SECONDS: u32 = 60;
++
++    // The binding sits behind gio's v2_64 feature; the function is in every
++    // GLib since 2.64.
++    unsafe extern "C" {
++        fn g_memory_monitor_dup_default() -> *mut gobject_ffi::GObject;
++    }
++
++    thread_local! {
++        /// The monitor stops warning once its last reference goes.
++        static MONITOR: RefCell<Option<glib::Object>> = const { RefCell::new(None) };
++        static STATE: Cell<(MemoryPressure, Option<Instant>)> = const { Cell::new((MemoryPressure::Normal, None)) };
++    }
++
++    /// GLib's levels: 50 low, 100 medium, 255 critical.
++    fn tier(level: i32) -> MemoryPressure {
++        if level >= 100 {
++            MemoryPressure::Critical
++        } else {
++            MemoryPressure::Warning
++        }
++    }
++
++    pub(super) fn install(shell: Handle) {
++        // SAFETY: returns a full reference to GLib's default monitor.
++        let monitor = unsafe { glib::Object::from_glib_full(g_memory_monitor_dup_default()) };
++        let warned = shell.clone();
++        monitor.connect_local("low-memory-warning", false, move |values| {
++            // SAFETY: the signal's second value is its GMemoryMonitorWarningLevel enum.
++            let level = values.get(1).map_or(0, |value| unsafe { gobject_ffi::g_value_get_enum(value.as_ptr()) });
++            let (current, _) = STATE.get();
++            // A milder warning does not lift a critical state early.
++            let next = if current == MemoryPressure::Critical { current } else { tier(level) };
++            STATE.set((next, Some(Instant::now())));
++            if next != current {
++                let _ = warned.dispatch(Command::SetMemoryPressure(next));
++                ease(warned.clone());
++            }
++            None
++        });
++        MONITOR.with(|slot| *slot.borrow_mut() = Some(monitor));
++    }
++
++    /// Back to normal once warnings have stopped for a while.
++    fn ease(shell: Handle) {
++        glib::timeout_add_seconds_local_once(EASE_SECONDS, move || {
++            let (current, last) = STATE.get();
++            let quiet = last.is_none_or(|last| last.elapsed() >= Duration::from_secs(EASE_SECONDS.into()));
++            if current == MemoryPressure::Normal {
++                return;
++            }
++            if quiet {
++                STATE.set((MemoryPressure::Normal, None));
++                let _ = shell.dispatch(Command::SetMemoryPressure(MemoryPressure::Normal));
++            } else {
++                ease(shell);
++            }
++        });
++    }
++
++    #[cfg(test)]
++    mod tests {
++        use super::*;
++
++        #[test]
++        fn glib_levels_map_to_tiers() {
++            assert_eq!(tier(50), MemoryPressure::Warning);
++            assert_eq!(tier(100), MemoryPressure::Critical);
++            assert_eq!(tier(255), MemoryPressure::Critical);
++        }
++    }
++}
++
+ #[cfg(target_os = "macos")]
+ mod native {
+     use dispatch2::{DispatchObject, DispatchRetained, DispatchSource};
