@@ -2,9 +2,15 @@
 //! and leaving fullscreen through two signals; the state is kept on the view,
 //! so the host reads it again when the change reaches it, as on the other
 //! platforms. WebKit's own handling then fills the toplevel window, which the
-//! shell's layout follows by giving the page the whole window.
+//! shell's layout follows by giving the page the whole window. While a page
+//! is fullscreen, Escape on the window asks it to leave, wherever the
+//! keyboard focus is.
+
+use std::cell::RefCell;
+use std::rc::Rc;
 
 use gtk::glib::prelude::ObjectExt;
+use gtk::prelude::{Cast, WidgetExt};
 use webkit2gtk::{WebView, WebViewExt};
 use wry::WebViewExtUnix;
 
@@ -19,6 +25,7 @@ const EXIT_WORLD: &str = "zephium-fullscreen";
 pub(crate) struct FullscreenObserver {
     view: WebView,
     signals: Vec<gtk::glib::SignalHandlerId>,
+    escape: EscapeKey,
 }
 
 impl Drop for FullscreenObserver {
@@ -26,6 +33,32 @@ impl Drop for FullscreenObserver {
         for signal in self.signals.drain(..) {
             self.view.disconnect(signal);
         }
+        release(&self.escape);
+    }
+}
+
+/// The window's Escape handler while the page is fullscreen.
+type EscapeKey = Rc<RefCell<Option<(gtk::Window, gtk::glib::SignalHandlerId)>>>;
+
+fn listen_for_escape(view: &WebView, escape: &EscapeKey) {
+    release(escape);
+    let Some(window) = view.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) else {
+        return;
+    };
+    let page = view.clone();
+    let signal = window.connect_key_press_event(move |_, event| {
+        if event.keyval() != gtk::gdk::keys::constants::Escape {
+            return gtk::glib::Propagation::Proceed;
+        }
+        ask_to_leave(&page);
+        gtk::glib::Propagation::Stop
+    });
+    *escape.borrow_mut() = Some((window, signal));
+}
+
+fn release(escape: &EscapeKey) {
+    if let Some((window, signal)) = escape.borrow_mut().take() {
+        window.disconnect(signal);
     }
 }
 
@@ -41,20 +74,24 @@ pub(crate) fn install_fullscreen_observer(view: &wry::WebView, changed: impl Fn(
         settings.set_enable_fullscreen(true);
     }
     set_state(&view, false);
-    let changed = std::rc::Rc::new(changed);
-    let on_enter = changed.clone();
+    let changed = Rc::new(changed);
+    let escape: EscapeKey = Rc::default();
+    let (on_enter, entered_escape) = (changed.clone(), escape.clone());
     let enter = view.connect_enter_fullscreen(move |view| {
         set_state(view, true);
+        listen_for_escape(view, &entered_escape);
         on_enter();
         // Not handled here: WebKit goes on to fill the window.
         false
     });
+    let left_escape = escape.clone();
     let leave = view.connect_leave_fullscreen(move |view| {
         set_state(view, false);
+        release(&left_escape);
         changed();
         false
     });
-    Ok(FullscreenObserver { view, signals: vec![enter, leave] })
+    Ok(FullscreenObserver { view, signals: vec![enter, leave], escape })
 }
 
 pub(crate) fn fullscreen_state(view: &wry::WebView) -> NativeFullscreen {
@@ -73,7 +110,11 @@ pub(crate) fn exit_fullscreen(view: &wry::WebView) {
     if fullscreen_state(view) != NativeFullscreen::Active {
         return;
     }
-    view.webview().evaluate_javascript(
+    ask_to_leave(&view.webview());
+}
+
+fn ask_to_leave(view: &WebView) {
+    view.evaluate_javascript(
         "document.fullscreenElement && document.exitFullscreen()",
         Some(EXIT_WORLD),
         None,

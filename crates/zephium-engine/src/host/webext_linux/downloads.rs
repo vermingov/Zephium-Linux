@@ -84,7 +84,10 @@ impl super::super::EngineHost {
                 if downloads.pending.len() >= MAX_PENDING {
                     return Err("Too many downloads at once.".into());
                 }
-                let folder = dirs::download_dir().ok_or("There is no Downloads folder.")?;
+                // Without a configured Downloads folder, ~/Downloads, as browsers do.
+                let folder = dirs::download_dir()
+                    .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
+                    .ok_or("There is no Downloads folder.")?;
                 let path = folder.join(relative_path(args.first().and_then(Value::as_str).unwrap_or_default())?);
                 downloads.next += 1;
                 downloads.pending.insert(downloads.next, Pending { path, data: Vec::new() });
