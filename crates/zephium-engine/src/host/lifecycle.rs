@@ -256,7 +256,6 @@ impl EngineHost {
                 );
             }
         }
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.forget_fullscreen(id);
         #[cfg(all(
             feature = "agentic-browser",

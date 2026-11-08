@@ -6,6 +6,8 @@ mod amo_button;
 mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
+mod fullscreen;
+mod web_features;
 mod stage;
 pub(crate) mod store_button;
 
@@ -26,6 +28,7 @@ pub(crate) use content_filter::{
     ContentPolicyCompilationCancellation, ContentPolicyRegistration, NativeContentPolicy,
 };
 pub(crate) use find::{find, FindReport, FindSession};
+pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state, install_fullscreen_observer, FullscreenObserver};
 pub use stage::Stage;
 
 use std::cell::RefCell;
@@ -439,6 +442,7 @@ pub fn configure(
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }
+    web_features::enable(&view);
     // Private profiles run no extensions, so they take no add-on either.
     if !expected_ephemeral {
         addon_download::offer_for_review(&view, partition.profile());

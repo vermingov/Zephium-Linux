@@ -214,13 +214,11 @@ impl EngineHost {
         region: Option<Rect>,
         motion: Option<StageMotion>,
     ) -> bool {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let shown = match region {
             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
             None => Vec::new(),
         };
         let applied = self.apply_content(window, tree, region, motion);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         self.fullscreen_layout_applied(window, &shown);
         applied
     }

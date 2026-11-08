@@ -96,6 +96,9 @@ impl super::super::EngineHost {
             "scripting.executeScript" | "scripting.insertCSS" | "scripting.removeCSS" | "tabs.executeScript" | "tabs.insertCSS" | "tabs.removeCSS" => {
                 return self.linux_inject(profile, message, id, &api, &args);
             }
+            "tabs.captureVisibleTab" | "tabs.captureTab" => {
+                return self.linux_capture(profile, message, id, &api, &args);
+            }
             "tabs.sendMessage" => {
                 let options = args.get(2).cloned().unwrap_or(Value::Null);
                 let target = arg_i64(&args, 0).and_then(|tab| self.linux_tab_view(profile, tab));
@@ -152,9 +155,9 @@ impl super::super::EngineHost {
         });
     }
 
-    /// The tab's view and the code to run there, once the extension is
-    /// allowed to: host permission for the tab's address, or `activeTab`.
-    fn linux_injection(&mut self, profile: ProfileId, extension_id: &str, tab: Option<i64>, api: &str, details: &Value) -> Result<(WebView, String), String> {
+    /// The tab's view, if the extension may read it: host permission for
+    /// the tab's address, or `activeTab`, and never on an add-on store.
+    pub(super) fn linux_readable_tab(&self, profile: ProfileId, extension_id: &str, tab: Option<i64>) -> Result<WebView, String> {
         let item = match tab {
             Some(number) => self.linux_tab_item(profile, number),
             None => self.linux_focused_tab(profile),
@@ -173,6 +176,14 @@ impl super::super::EngineHost {
         if !allowed {
             return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());
         }
+        Ok(view)
+    }
+
+    /// The tab's view and the code to run there, once the extension is
+    /// allowed to: host permission for the tab's address, or `activeTab`.
+    fn linux_injection(&mut self, profile: ProfileId, extension_id: &str, tab: Option<i64>, api: &str, details: &Value) -> Result<(WebView, String), String> {
+        let view = self.linux_readable_tab(profile, extension_id, tab)?;
+        let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
         let files: Vec<String> = match &details["files"] {
             Value::Array(files) => files.iter().filter_map(|file| file.as_str().map(str::to_owned)).collect(),
             _ => details["file"].as_str().map(str::to_owned).into_iter().collect(),
@@ -206,6 +217,7 @@ impl super::super::EngineHost {
             "storage" => self.linux_storage(profile, extension_id, method, args),
             "declarativeNetRequest" => self.linux_dnr(profile, extension_id, method, args),
             "scripting" => self.linux_registered(profile, extension_id, method, args),
+            "downloads" => self.linux_downloads(profile, extension_id, method, args),
             "tabs" => self.linux_tabs(profile, message, from, method, args),
             "windows" => self.linux_windows(profile, message, method, args),
             "action" => self.linux_action_call(profile, extension_id, method, args),

@@ -70,6 +70,30 @@
     };
   }
 
+  // A promise delivered as a method's answer would be.
+  function settle(pending, callback) {
+    if (!callback) return pending;
+    pending.then((value) => callback(value), (error) => withLastError(error, () => callback()));
+    return undefined;
+  }
+
+  // downloads.download: the file is read here, where its blob or data URL
+  // lives, and sent to the browser in pieces small enough for the channel.
+  async function saveDownload(options) {
+    const response = await fetch(options.url);
+    if (!response.ok) throw new Error(`The download failed: ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const name = options.filename || new URL(options.url).pathname.split("/").pop() || "download";
+    const token = await request("downloads.begin", [name]);
+    const piece = 36 * 1024; // 48 KiB once in base64, inside the channel's limit
+    for (let at = 0; at < bytes.length; at += piece) {
+      let text = "";
+      for (const byte of bytes.subarray(at, at + piece)) text += String.fromCharCode(byte);
+      await request("downloads.chunk", [token, btoa(text)]);
+    }
+    return request("downloads.finish", [token]);
+  }
+
   // An answer known in this context, delivered as a method's would be.
   function answer(value) {
     return (...args) => {
@@ -310,7 +334,7 @@
       query: undefined, get: undefined, getCurrent: undefined, create: undefined, update: undefined,
       remove: undefined, reload: undefined, duplicate: undefined, sendMessage: undefined,
       executeScript: undefined, insertCSS: undefined, removeCSS: undefined,
-      connect: connector("tabs.connect"), captureVisibleTab: undefined, detectLanguage: undefined,
+      connect: connector("tabs.connect"), captureVisibleTab: undefined, captureTab: undefined, detectLanguage: undefined,
     }, ["onCreated", "onUpdated", "onActivated", "onRemoved", "onReplaced", "onMoved", "onHighlighted"]);
     tabs.TAB_ID_NONE = -1;
 
@@ -392,6 +416,10 @@
       webRequest: namespace("webRequest", { handlerBehaviorChanged: answer(undefined) },
         ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
           "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]),
+      downloads: namespace("downloads", {
+        download: (options, callback) => settle(saveDownload(options || {}), callback),
+        search: undefined, erase: undefined, cancel: undefined,
+      }, ["onCreated", "onChanged", "onErased", "onDeterminingFilename"]),
       idle: namespace("idle", { queryState: answer("active"), setDetectionInterval: answer(undefined) }, ["onStateChanged"]),
       management: namespace("management", {
         getSelf: answer({

@@ -35,7 +35,6 @@ mod favicon;
 #[cfg(target_os = "macos")]
 mod file_uploads;
 mod focus;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod generic_styles;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -201,7 +200,7 @@ struct ObservedView {
     #[cfg(target_os = "macos")]
     _fullscreen_observer:
         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
-    #[cfg(target_os = "windows")]
+    #[cfg(not(target_os = "macos"))]
     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
     #[cfg(target_os = "windows")]
     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
@@ -673,7 +672,6 @@ pub(crate) struct EngineHost {
     /// open pages without rebuilding them.
     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fullscreen: crate::fullscreen::FullscreenLedger,
     #[cfg(target_os = "macos")]
     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,

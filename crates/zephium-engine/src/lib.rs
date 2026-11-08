@@ -15,7 +15,6 @@ mod data_kinds;
 #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
 mod diagnostics;
 mod erasure;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 mod fullscreen;
 mod haptics;
 #[cfg(any(target_os = "windows", test))]
@@ -3080,7 +3079,7 @@ impl Engine for WebviewEngine {
     }
 
     fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
-        if cfg!(target_os = "windows") {
+        if cfg!(not(target_os = "macos")) {
             zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
         } else {
             zephium_core::ports::engine::FullscreenPresentation::OwnWindow
@@ -3107,15 +3106,7 @@ impl Engine for WebviewEngine {
     }
 
     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        {
-            self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            let _ = id;
-            NativeDispatch::Unsupported
-        }
+        self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
     }
 
     fn stop_media_capture(

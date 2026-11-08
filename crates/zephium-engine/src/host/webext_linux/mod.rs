@@ -9,7 +9,9 @@
 
 mod action;
 mod api;
+mod capture;
 mod dnr;
+mod downloads;
 mod events;
 mod registered;
 mod routing;
@@ -103,6 +105,7 @@ pub(super) struct Install {
     /// The manifest's content scripts, and those registered at run time.
     manifest_groups: Vec<zephium_webext_linux::content::Group>,
     pub(super) registered: registered::Registered,
+    pub(super) downloads: downloads::Downloads,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -169,6 +172,7 @@ impl Install {
             dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
             manifest_groups,
             registered: registered::Registered::open(storage.as_deref()),
+            downloads: downloads::Downloads::default(),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
