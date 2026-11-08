@@ -1231,6 +1231,16 @@ impl EngineHost {
                 // top (its frames count in FrameNavigationStarting); macOS
                 // asks the Apple handler below instead.
                 zephium_core::blocker::PageActivity::shared().note_navigation();
+                // WebKitGTK does not say which frame: a page's own srcdoc,
+                // data: and blob: frames are judged as about:blank, as macOS
+                // judges a subframe's, and the platform layer refuses them
+                // as a tab's own document.
+                #[cfg(all(unix, not(target_os = "macos")))]
+                let target = if zephium_core::navigation::is_subframe_document(&target) {
+                    "about:blank".to_owned()
+                } else {
+                    target
+                };
                 let admitted = navigation_permit.allows_navigation(&target)
                     && policy_navigation.admits_target(&target);
                 // WebView2 may ask here before LaunchingExternalUriScheme; the
