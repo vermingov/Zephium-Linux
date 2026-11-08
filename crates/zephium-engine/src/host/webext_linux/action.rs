@@ -368,19 +368,23 @@ fn open_popup(
     });
     view.connect_close(move |_| dismiss());
 
-    // Once loaded, the popup takes the page's own size, and again once the
-    // page's script has drawn what it shows.
+    // Once loaded, the popup takes the page's own size, and follows it while
+    // open: a popup's page grows and shrinks as its script draws.
     let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
     view.connect_load_changed(move |view, event| {
         if event != webkit2gtk::LoadEvent::Finished {
             return;
         }
-        for delay in [0, 250, 1000] {
-            let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
-                fit_popup(&view, parent, frame, anchor);
-            });
-        }
+        let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
+        fit_popup(&view, parent.clone(), frame.clone(), anchor);
+        gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
+            // Closed: the frame left the stage.
+            if frame.parent().is_none() {
+                return gtk::glib::ControlFlow::Break;
+            }
+            fit_popup(&view, parent.clone(), frame.clone(), anchor);
+            gtk::glib::ControlFlow::Continue
+        });
     });
 
     view.load_uri(url);
@@ -395,6 +399,9 @@ fn fit_popup(view: &WebView, parent: gtk::Fixed, frame: gtk::Frame, anchor: zeph
     let sized = view.clone();
     view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
         if let Some(size) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
+            if sized.size_request() == size {
+                return;
+            }
             sized.set_size_request(size.0, size.1);
             let (x, y) = popup_place(&parent, anchor, size);
             parent.move_(&frame, x, y);

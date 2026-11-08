@@ -881,7 +881,7 @@ fn user_native_action_results_are_never_silently_discarded() {
 }
 
 #[test]
-fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
+fn raw_native_device_permissions_are_deny_only_or_exactly_brokered_per_view() {
     let source = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/src/host/construction.rs"
@@ -910,9 +910,16 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
         PermissionKind::LocalFonts,
         PermissionKind::AutomaticDownloads,
     ];
+    assert_eq!(
+        raw_content_permission_on(PermissionKind::MediaKeySystemAccess, false),
+        PermissionResponse::Allow
+    );
+    assert_eq!(
+        raw_content_permission_on(PermissionKind::MediaKeySystemAccess, true),
+        PermissionResponse::Deny
+    );
     let never = [
         PermissionKind::DisplayCapture,
-        PermissionKind::MediaKeySystemAccess,
         PermissionKind::WindowManagement,
         PermissionKind::PointerLock,
         PermissionKind::FileSystemAccess,

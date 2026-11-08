@@ -239,7 +239,6 @@ enum HostTaskKey {
     Title(ItemId),
     NavigationCommit(ItemId),
     NavigationSettlement(ItemId),
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Fullscreen(ItemId),
     Discard(ItemId),
     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
@@ -500,7 +499,6 @@ pub(crate) fn install(
             discarded_state_revision: 0,
             user_content,
             shortcuts: Arc::default(),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             fullscreen: crate::fullscreen::FullscreenLedger::default(),
             #[cfg(target_os = "macos")]
             fullscreen_retiring: HashMap::new(),
@@ -1052,7 +1050,6 @@ where
 
 /// Each callback re-reads the view's native state when it runs, so only the
 /// newest of adjacent callbacks for one view needs to survive.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(super) fn with_fullscreen_observation<F>(id: ItemId, f: F)
 where
     F: FnOnce(&mut EngineHost) + 'static,
