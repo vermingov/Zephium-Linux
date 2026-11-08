@@ -96,6 +96,10 @@ impl super::super::EngineHost {
             "scripting.executeScript" | "scripting.insertCSS" | "scripting.removeCSS" | "tabs.executeScript" | "tabs.insertCSS" | "tabs.removeCSS" => {
                 return self.linux_inject(profile, message, id, &api, &args);
             }
+            "cookies.get" | "cookies.getAll" | "cookies.set" | "cookies.remove" | "cookies.getAllCookieStores" => {
+                let method = api.trim_start_matches("cookies.").to_owned();
+                return self.linux_cookies(profile, message, id, &method, &args);
+            }
             "tabs.captureVisibleTab" | "tabs.captureTab" => {
                 return self.linux_capture(profile, message, id, &api, &args);
             }
@@ -228,7 +232,6 @@ impl super::super::EngineHost {
             "commands" if method == "getAll" => Ok(self.linux_commands(profile, extension_id)),
             "notifications" => linux_notification(extension_id, method, args),
             "contextMenus" => self.linux_menus(profile, extension_id, method, args),
-            "cookies" => Ok(if method == "getAll" { json!([]) } else { Value::Null }),
             "webNavigation" => Ok(Value::Null),
             _ => unsupported(api),
         };

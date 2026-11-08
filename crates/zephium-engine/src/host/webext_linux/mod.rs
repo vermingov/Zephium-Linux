@@ -11,6 +11,7 @@ mod action;
 mod api;
 mod capture;
 mod commands;
+mod cookies;
 mod dnr;
 mod downloads;
 mod events;
