@@ -1,0 +1,976 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 03:03:06 +0100
+Subject: [PATCH 9/9] feat(linux): extension captures and downloads, page
+ fullscreen, WebRTC and WebGPU
+
+- tabs.captureVisibleTab and Firefox's tabs.captureTab: WebKit's snapshot
+  of a tab the extension may read, cropped and scaled, as a PNG data URL.
+- downloads.download: read in the extension's own context and sent in
+  pieces within the channel's bound, then saved inside the Downloads
+  folder (~/Downloads when none is configured), never over a file.
+- Popups follow their page's size while open.
+- Element fullscreen, switched off on Linux pending a broker: WebKitGTK's
+  enter and leave signals feed the same ledger as on Windows, the page
+  fills the window and the window follows; Escape on the window or the
+  host asks the page to leave.
+- WebRTC and WebGPU, off by default in WebKitGTK, are switched on for
+  tabs (WebRTC takes effect where WebKitGTK is built with it).
+---
+ .../zephium-engine/src/host/construction.rs   |   6 +-
+ crates/zephium-engine/src/host/dispatch.rs    |   3 -
+ crates/zephium-engine/src/host/fullscreen.rs  |   5 +-
+ crates/zephium-engine/src/host/lifecycle.rs   |   1 -
+ crates/zephium-engine/src/host/mod.rs         |   4 +-
+ crates/zephium-engine/src/host/navigation.rs  |   1 -
+ crates/zephium-engine/src/host/stages.rs      |   2 -
+ crates/zephium-engine/src/host/tests/mod.rs   |  11 +-
+ .../src/host/webext_linux/action.rs           |  23 ++-
+ .../src/host/webext_linux/api.rs              |  18 +-
+ .../src/host/webext_linux/capture.rs          | 112 ++++++++++++
+ .../src/host/webext_linux/downloads.rs        | 164 ++++++++++++++++++
+ .../src/host/webext_linux/mod.rs              |   4 +
+ crates/zephium-engine/src/lib.rs              |  13 +-
+ .../src/platform/linux/fullscreen.rs          | 140 +++++++++++++++
+ .../zephium-engine/src/platform/linux/mod.rs  |   4 +
+ .../src/platform/linux/web_features.rs        |  50 ++++++
+ crates/zephium-webext-linux/js/runtime.js     |  30 +++-
+ 18 files changed, 551 insertions(+), 40 deletions(-)
+ create mode 100644 crates/zephium-engine/src/host/webext_linux/capture.rs
+ create mode 100644 crates/zephium-engine/src/host/webext_linux/downloads.rs
+ create mode 100644 crates/zephium-engine/src/platform/linux/fullscreen.rs
+ create mode 100644 crates/zephium-engine/src/platform/linux/web_features.rs
+
+diff --git a/crates/zephium-engine/src/host/construction.rs b/crates/zephium-engine/src/host/construction.rs
+index d78190f6..aaa40287 100644
+--- a/crates/zephium-engine/src/host/construction.rs
++++ b/crates/zephium-engine/src/host/construction.rs
+@@ -1,4 +1,3 @@
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
+ use super::dispatch::with_fullscreen_observation;
+ #[cfg(target_os = "windows")]
+ use super::dispatch::with_profile_exit;
+@@ -2656,7 +2655,6 @@ impl EngineHost {
+                 }
+             })
+         };
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         let fullscreen_observer = {
+             let fullscreen_id = id.clone();
+             let fullscreen_permit = event_permit.clone();
+@@ -2674,7 +2672,7 @@ impl EngineHost {
+             {
+                 crate::platform::macos::fullscreen::FullscreenObserver::install(&view, changed)
+             }
+-            #[cfg(target_os = "windows")]
++            #[cfg(not(target_os = "macos"))]
+             match crate::platform::imp::install_fullscreen_observer(&view, changed) {
+                 Ok(observer) => observer,
+                 Err(error) => {
+@@ -2842,7 +2840,6 @@ impl EngineHost {
+             _audio_observer: audio_observer,
+             #[cfg(target_os = "windows")]
+             audio_observer,
+-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+             _fullscreen_observer: fullscreen_observer,
+             replay_safety,
+             discard_probe_lease: std::cell::RefCell::new(None),
+@@ -3394,6 +3391,7 @@ pub(super) fn raw_content_permission_on(
+         {
+             wry::PermissionResponse::Prompt
+         }
++        Kind::MediaKeySystemAccess if !windows => wry::PermissionResponse::Allow,
+         _ => wry::PermissionResponse::Deny,
+     }
+ }
+diff --git a/crates/zephium-engine/src/host/dispatch.rs b/crates/zephium-engine/src/host/dispatch.rs
+index d48c4bbd..9c797d0e 100644
+--- a/crates/zephium-engine/src/host/dispatch.rs
++++ b/crates/zephium-engine/src/host/dispatch.rs
+@@ -239,7 +239,6 @@ enum HostTaskKey {
+     Title(ItemId),
+     NavigationCommit(ItemId),
+     NavigationSettlement(ItemId),
+-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+     Fullscreen(ItemId),
+     Discard(ItemId),
+     #[cfg_attr(not(any(target_os = "macos", target_os = "windows")), allow(dead_code))]
+@@ -500,7 +499,6 @@ pub(crate) fn install(
+             discarded_state_revision: 0,
+             user_content,
+             shortcuts: Arc::default(),
+-            #[cfg(any(target_os = "macos", target_os = "windows"))]
+             fullscreen: crate::fullscreen::FullscreenLedger::default(),
+             #[cfg(target_os = "macos")]
+             fullscreen_retiring: HashMap::new(),
+@@ -1052,7 +1050,6 @@ where
+ 
+ /// Each callback re-reads the view's native state when it runs, so only the
+ /// newest of adjacent callbacks for one view needs to survive.
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
+ pub(super) fn with_fullscreen_observation<F>(id: ItemId, f: F)
+ where
+     F: FnOnce(&mut EngineHost) + 'static,
+diff --git a/crates/zephium-engine/src/host/fullscreen.rs b/crates/zephium-engine/src/host/fullscreen.rs
+index 7c1b8830..b0bdfccb 100644
+--- a/crates/zephium-engine/src/host/fullscreen.rs
++++ b/crates/zephium-engine/src/host/fullscreen.rs
+@@ -7,7 +7,9 @@ use zephium_core::ports::engine::EngineEvent;
+ 
+ use super::permits::EventPermit;
+ use super::EngineHost;
+-use crate::fullscreen::{FullscreenEffect, NativeFullscreen};
++use crate::fullscreen::FullscreenEffect;
++#[cfg(any(target_os = "macos", target_os = "windows"))]
++use crate::fullscreen::NativeFullscreen;
+ 
+ /// How long a closed tab may wait for WebKit to bring its page home from the
+ /// fullscreen window before it is torn down regardless.
+@@ -47,6 +49,7 @@ impl EngineHost {
+         #[cfg(target_os = "windows")]
+         self.sync_stage_fullscreen();
+         self.apply_fullscreen_effects(effects);
++        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         if state == NativeFullscreen::Inactive {
+             self.automatic_pip_after_fullscreen(id);
+         }
+diff --git a/crates/zephium-engine/src/host/lifecycle.rs b/crates/zephium-engine/src/host/lifecycle.rs
+index c84ec637..28671d59 100644
+--- a/crates/zephium-engine/src/host/lifecycle.rs
++++ b/crates/zephium-engine/src/host/lifecycle.rs
+@@ -240,7 +240,6 @@ impl EngineHost {
+                 );
+             }
+         }
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         self.forget_fullscreen(id);
+         #[cfg(all(
+             feature = "agentic-browser",
+diff --git a/crates/zephium-engine/src/host/mod.rs b/crates/zephium-engine/src/host/mod.rs
+index 460bbb94..973d4a1e 100644
+--- a/crates/zephium-engine/src/host/mod.rs
++++ b/crates/zephium-engine/src/host/mod.rs
+@@ -35,7 +35,6 @@ mod favicon;
+ #[cfg(target_os = "macos")]
+ mod file_uploads;
+ mod focus;
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
+ mod fullscreen;
+ mod generic_styles;
+ #[cfg(any(target_os = "macos", target_os = "windows"))]
+@@ -201,7 +200,7 @@ struct ObservedView {
+     #[cfg(target_os = "macos")]
+     _fullscreen_observer:
+         objc2::rc::Retained<crate::platform::macos::fullscreen::FullscreenObserver>,
+-    #[cfg(target_os = "windows")]
++    #[cfg(not(target_os = "macos"))]
+     _fullscreen_observer: crate::platform::imp::FullscreenObserver,
+     #[cfg(target_os = "windows")]
+     _favicon_observer: Option<crate::platform::imp::FaviconObserver>,
+@@ -673,7 +672,6 @@ pub(crate) struct EngineHost {
+     /// open pages without rebuilding them.
+     #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+     shortcuts: Arc<std::sync::RwLock<Vec<Shortcut>>>,
+-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+     fullscreen: crate::fullscreen::FullscreenLedger,
+     #[cfg(target_os = "macos")]
+     fullscreen_retiring: HashMap<u64, fullscreen::RetiringView>,
+diff --git a/crates/zephium-engine/src/host/navigation.rs b/crates/zephium-engine/src/host/navigation.rs
+index fdbb18b6..eee5fc25 100644
+--- a/crates/zephium-engine/src/host/navigation.rs
++++ b/crates/zephium-engine/src/host/navigation.rs
+@@ -153,7 +153,6 @@ impl EngineHost {
+             view.presentation_permit.store(false, Ordering::Release);
+             view.title_ready = None;
+         }
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         self.fullscreen_document_committed(id);
+         let mut stages_pending = true;
+         for stage in self.stages.values() {
+diff --git a/crates/zephium-engine/src/host/stages.rs b/crates/zephium-engine/src/host/stages.rs
+index 772bf58e..854153d9 100644
+--- a/crates/zephium-engine/src/host/stages.rs
++++ b/crates/zephium-engine/src/host/stages.rs
+@@ -214,13 +214,11 @@ impl EngineHost {
+         region: Option<Rect>,
+         motion: Option<StageMotion>,
+     ) -> bool {
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         let shown = match region {
+             Some(_) => tree.as_ref().map(Pane::tabs).unwrap_or_default(),
+             None => Vec::new(),
+         };
+         let applied = self.apply_content(window, tree, region, motion);
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+         self.fullscreen_layout_applied(window, &shown);
+         applied
+     }
+diff --git a/crates/zephium-engine/src/host/tests/mod.rs b/crates/zephium-engine/src/host/tests/mod.rs
+index 90d7636e..2b12c914 100644
+--- a/crates/zephium-engine/src/host/tests/mod.rs
++++ b/crates/zephium-engine/src/host/tests/mod.rs
+@@ -881,7 +881,7 @@ fn user_native_action_results_are_never_silently_discarded() {
+ }
+ 
+ #[test]
+-fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
++fn raw_native_device_permissions_are_deny_only_or_exactly_brokered_per_view() {
+     let source = include_str!(concat!(
+         env!("CARGO_MANIFEST_DIR"),
+         "/src/host/construction.rs"
+@@ -910,9 +910,16 @@ fn raw_native_media_surfaces_are_deny_only_or_exactly_brokered_per_view() {
+         PermissionKind::LocalFonts,
+         PermissionKind::AutomaticDownloads,
+     ];
++    assert_eq!(
++        raw_content_permission_on(PermissionKind::MediaKeySystemAccess, false),
++        PermissionResponse::Allow
++    );
++    assert_eq!(
++        raw_content_permission_on(PermissionKind::MediaKeySystemAccess, true),
++        PermissionResponse::Deny
++    );
+     let never = [
+         PermissionKind::DisplayCapture,
+-        PermissionKind::MediaKeySystemAccess,
+         PermissionKind::WindowManagement,
+         PermissionKind::PointerLock,
+         PermissionKind::FileSystemAccess,
+diff --git a/crates/zephium-engine/src/host/webext_linux/action.rs b/crates/zephium-engine/src/host/webext_linux/action.rs
+index d130a45a..e6aaefe4 100644
+--- a/crates/zephium-engine/src/host/webext_linux/action.rs
++++ b/crates/zephium-engine/src/host/webext_linux/action.rs
+@@ -368,19 +368,23 @@ fn open_popup(
+     });
+     view.connect_close(move |_| dismiss());
+ 
+-    // Once loaded, the popup takes the page's own size, and again once the
+-    // page's script has drawn what it shows.
++    // Once loaded, the popup takes the page's own size, and follows it while
++    // open: a popup's page grows and shrinks as its script draws.
+     let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
+     view.connect_load_changed(move |view, event| {
+         if event != webkit2gtk::LoadEvent::Finished {
+             return;
+         }
+-        for delay in [0, 250, 1000] {
+-            let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
+-            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
+-                fit_popup(&view, parent, frame, anchor);
+-            });
+-        }
++        let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
++        fit_popup(&view, parent.clone(), frame.clone(), anchor);
++        gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
++            // Closed: the frame left the stage.
++            if frame.parent().is_none() {
++                return gtk::glib::ControlFlow::Break;
++            }
++            fit_popup(&view, parent.clone(), frame.clone(), anchor);
++            gtk::glib::ControlFlow::Continue
++        });
+     });
+ 
+     view.load_uri(url);
+@@ -395,6 +399,9 @@ fn fit_popup(view: &WebView, parent: gtk::Fixed, frame: gtk::Frame, anchor: zeph
+     let sized = view.clone();
+     view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
+         if let Some(size) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
++            if sized.size_request() == size {
++                return;
++            }
+             sized.set_size_request(size.0, size.1);
+             let (x, y) = popup_place(&parent, anchor, size);
+             parent.move_(&frame, x, y);
+diff --git a/crates/zephium-engine/src/host/webext_linux/api.rs b/crates/zephium-engine/src/host/webext_linux/api.rs
+index 268daf2f..c6f97a94 100644
+--- a/crates/zephium-engine/src/host/webext_linux/api.rs
++++ b/crates/zephium-engine/src/host/webext_linux/api.rs
+@@ -96,6 +96,9 @@ impl super::super::EngineHost {
+             "scripting.executeScript" | "scripting.insertCSS" | "scripting.removeCSS" | "tabs.executeScript" | "tabs.insertCSS" | "tabs.removeCSS" => {
+                 return self.linux_inject(profile, message, id, &api, &args);
+             }
++            "tabs.captureVisibleTab" | "tabs.captureTab" => {
++                return self.linux_capture(profile, message, id, &api, &args);
++            }
+             "tabs.sendMessage" => {
+                 let options = args.get(2).cloned().unwrap_or(Value::Null);
+                 let target = arg_i64(&args, 0).and_then(|tab| self.linux_tab_view(profile, tab));
+@@ -152,9 +155,9 @@ impl super::super::EngineHost {
+         });
+     }
+ 
+-    /// The tab's view and the code to run there, once the extension is
+-    /// allowed to: host permission for the tab's address, or `activeTab`.
+-    fn linux_injection(&mut self, profile: ProfileId, extension_id: &str, tab: Option<i64>, api: &str, details: &Value) -> Result<(WebView, String), String> {
++    /// The tab's view, if the extension may read it: host permission for
++    /// the tab's address, or `activeTab`, and never on an add-on store.
++    pub(super) fn linux_readable_tab(&self, profile: ProfileId, extension_id: &str, tab: Option<i64>) -> Result<WebView, String> {
+         let item = match tab {
+             Some(number) => self.linux_tab_item(profile, number),
+             None => self.linux_focused_tab(profile),
+@@ -173,6 +176,14 @@ impl super::super::EngineHost {
+         if !allowed {
+             return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());
+         }
++        Ok(view)
++    }
++
++    /// The tab's view and the code to run there, once the extension is
++    /// allowed to: host permission for the tab's address, or `activeTab`.
++    fn linux_injection(&mut self, profile: ProfileId, extension_id: &str, tab: Option<i64>, api: &str, details: &Value) -> Result<(WebView, String), String> {
++        let view = self.linux_readable_tab(profile, extension_id, tab)?;
++        let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
+         let files: Vec<String> = match &details["files"] {
+             Value::Array(files) => files.iter().filter_map(|file| file.as_str().map(str::to_owned)).collect(),
+             _ => details["file"].as_str().map(str::to_owned).into_iter().collect(),
+@@ -206,6 +217,7 @@ impl super::super::EngineHost {
+             "storage" => self.linux_storage(profile, extension_id, method, args),
+             "declarativeNetRequest" => self.linux_dnr(profile, extension_id, method, args),
+             "scripting" => self.linux_registered(profile, extension_id, method, args),
++            "downloads" => self.linux_downloads(profile, extension_id, method, args),
+             "tabs" => self.linux_tabs(profile, message, from, method, args),
+             "windows" => self.linux_windows(profile, message, method, args),
+             "action" => self.linux_action_call(profile, extension_id, method, args),
+diff --git a/crates/zephium-engine/src/host/webext_linux/capture.rs b/crates/zephium-engine/src/host/webext_linux/capture.rs
+new file mode 100644
+index 00000000..6cb4e706
+--- /dev/null
++++ b/crates/zephium-engine/src/host/webext_linux/capture.rs
+@@ -0,0 +1,112 @@
++//! `tabs.captureVisibleTab` and Firefox's `tabs.captureTab`: a picture of a
++//! tab the extension may read, as a PNG data URL. WebKit draws the snapshot;
++//! a rectangle crops it from the whole document and a scale resizes it.
++
++use base64::Engine as _;
++use serde_json::{json, Value};
++use webkit2gtk::{SnapshotOptions, SnapshotRegion, WebViewExt};
++use zephium_core::ids::ProfileId;
++
++use super::routing::{error, ok};
++use crate::platform::imp::extension_channel::Message;
++
++/// More pixels than this is refused rather than drawn: about 8K by 8K.
++const MAX_PIXELS: f64 = 64_000_000.0;
++
++/// What to draw: the part of the document, in CSS pixels, and the scale.
++#[derive(Debug, PartialEq)]
++struct Shot {
++    rect: Option<(f64, f64, f64, f64)>,
++    scale: f64,
++}
++
++/// The options of either call. `captureVisibleTab` takes no rectangle.
++fn shot(options: &Value) -> Result<Shot, String> {
++    let rect = match &options["rect"] {
++        Value::Object(rect) => {
++            let number = |key: &str| rect.get(key).and_then(Value::as_f64).filter(|value| value.is_finite());
++            let (x, y, width, height) = (number("x"), number("y"), number("width"), number("height"));
++            match (x, y, width, height) {
++                (Some(x), Some(y), Some(width), Some(height)) if width > 0.0 && height > 0.0 => Some((x, y, width, height)),
++                _ => return Err("The capture rectangle is not valid.".into()),
++            }
++        }
++        _ => None,
++    };
++    let scale = options["scale"].as_f64().filter(|scale| scale.is_finite() && *scale > 0.0).unwrap_or(1.0).min(4.0);
++    if let Some((_, _, width, height)) = rect {
++        if width * height * scale * scale > MAX_PIXELS {
++            return Err("The capture is larger than the browser draws.".into());
++        }
++    }
++    Ok(Shot { rect, scale })
++}
++
++impl super::super::EngineHost {
++    /// Answers `message` once WebKit has drawn the tab.
++    pub(super) fn linux_capture(&mut self, profile: ProfileId, message: Message, id: u64, api: &str, args: &[Value]) {
++        // captureVisibleTab([windowId], [options]); captureTab([tabId], [options]).
++        let (target, options) = match args {
++            [Value::Number(number), options, ..] => (number.as_i64(), options.clone()),
++            [Value::Number(number)] => (number.as_i64(), Value::Null),
++            [Value::Null, options, ..] => (None, options.clone()),
++            [options, ..] => (None, options.clone()),
++            [] => (None, Value::Null),
++        };
++        // A window ID names the window, not a tab: its active tab is drawn.
++        let tab = if api == "tabs.captureTab" { target } else { None };
++        let prepared = shot(&options).and_then(|shot| Ok((self.linux_readable_tab(profile, &message.extension_id, tab)?, shot)));
++        let (view, shot) = match prepared {
++            Ok(prepared) => prepared,
++            Err(reason) => return message.reply(&error(id, &reason)),
++        };
++        let region = if shot.rect.is_some() { SnapshotRegion::FullDocument } else { SnapshotRegion::Visible };
++        view.snapshot(region, SnapshotOptions::NONE, None::<&gtk::gio::Cancellable>, move |surface| {
++            let picture = surface.map_err(|failure| failure.to_string()).and_then(|surface| encode(&surface, &shot));
++            match picture {
++                Ok(url) => message.reply(&ok(id, json!(url))),
++                Err(reason) => message.reply(&error(id, &format!("The tab could not be captured: {reason}"))),
++            }
++        });
++    }
++}
++
++/// The snapshot cropped and scaled as asked, as a PNG data URL.
++fn encode(surface: &gtk::cairo::Surface, shot: &Shot) -> Result<String, String> {
++    let image = gtk::cairo::ImageSurface::try_from(surface.clone()).map_err(|_| "WebKit drew no image")?;
++    let (full_width, full_height) = (image.width(), image.height());
++    let (x, y, width, height) = match shot.rect {
++        Some((x, y, width, height)) => {
++            let x = (x.max(0.0) as i32).min(full_width);
++            let y = (y.max(0.0) as i32).min(full_height);
++            (x, y, (width as i32).min(full_width - x), (height as i32).min(full_height - y))
++        }
++        None => (0, 0, full_width, full_height),
++    };
++    if width <= 0 || height <= 0 {
++        return Err("the rectangle lies outside the page".into());
++    }
++    let mut picture = gtk::gdk::pixbuf_get_from_surface(&image, x, y, width, height).ok_or("the snapshot could not be read")?;
++    if (shot.scale - 1.0).abs() > f64::EPSILON {
++        let (scaled_width, scaled_height) = (((width as f64) * shot.scale).round() as i32, ((height as f64) * shot.scale).round() as i32);
++        picture = picture
++            .scale_simple(scaled_width.max(1), scaled_height.max(1), gtk::gdk_pixbuf::InterpType::Bilinear)
++            .ok_or("the snapshot could not be scaled")?;
++    }
++    let png = picture.save_to_bufferv("png", &[]).map_err(|failure| failure.to_string())?;
++    Ok(format!("data:image/png;base64,{}", base64::engine::general_purpose::STANDARD.encode(png)))
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn options_read_as_chrome_and_firefox_give_them() {
++        assert_eq!(shot(&Value::Null).unwrap(), Shot { rect: None, scale: 1.0 });
++        let firefox = json!({ "format": "png", "rect": { "x": 0, "y": 10, "width": 300, "height": 200 }, "scale": 2 });
++        assert_eq!(shot(&firefox).unwrap(), Shot { rect: Some((0.0, 10.0, 300.0, 200.0)), scale: 2.0 });
++        assert!(shot(&json!({ "rect": { "x": 0, "y": 0, "width": 0, "height": 5 } })).is_err());
++        assert!(shot(&json!({ "rect": { "x": 0, "y": 0, "width": 20000, "height": 20000 } })).is_err());
++    }
++}
+diff --git a/crates/zephium-engine/src/host/webext_linux/downloads.rs b/crates/zephium-engine/src/host/webext_linux/downloads.rs
+new file mode 100644
+index 00000000..b65be02e
+--- /dev/null
++++ b/crates/zephium-engine/src/host/webext_linux/downloads.rs
+@@ -0,0 +1,164 @@
++//! `downloads.download` for extensions: a file the extension made or fetched
++//! is saved in the user's Downloads folder.
++//!
++//! Messages from an extension are bounded, so the API layer reads the file
++//! in the extension's own context (a blob, data or web URL) and sends it in
++//! pieces: `begin` names it, `chunk` adds to it, `finish` saves it. The path
++//! stays inside Downloads, and an existing file is never replaced.
++
++use std::collections::HashMap;
++use std::path::{Component, Path, PathBuf};
++
++use base64::Engine as _;
++use serde_json::{json, Value};
++use zephium_core::ids::ProfileId;
++
++use super::routing::{raise, Endpoint};
++
++/// The most one extension may save in one file, and keep pending at once.
++const MAX_FILE_BYTES: usize = 256 * 1024 * 1024;
++const MAX_PENDING: usize = 8;
++
++#[derive(Default)]
++pub(super) struct Downloads {
++    next: u64,
++    pending: HashMap<u64, Pending>,
++}
++
++struct Pending {
++    path: PathBuf,
++    data: Vec<u8>,
++}
++
++/// `filename` as a path inside the Downloads folder: relative, without `..`
++/// and with the characters other systems refuse replaced.
++fn relative_path(filename: &str) -> Result<PathBuf, String> {
++    let mut path = PathBuf::new();
++    for part in filename.split(['/', '\\']).filter(|part| !part.is_empty()) {
++        if part == "." || part == ".." {
++            return Err("The file name may not leave the Downloads folder.".into());
++        }
++        let clean: String = part
++            .chars()
++            .map(|character| if character.is_control() || "<>:\"|?*".contains(character) { '_' } else { character })
++            .collect();
++        let clean = clean.trim_end_matches(['.', ' ']).to_owned();
++        if clean.is_empty() || clean.len() > 255 {
++            return Err("The file name is not valid.".into());
++        }
++        path.push(clean);
++    }
++    match path.components().all(|part| matches!(part, Component::Normal(_))) && path.components().next().is_some() {
++        true => Ok(path),
++        false => Err("The file name is not valid.".into()),
++    }
++}
++
++/// `wanted`, or the first of `name (1).ext`, `name (2).ext`… not taken.
++fn free_path(wanted: &Path) -> PathBuf {
++    if !wanted.exists() {
++        return wanted.to_owned();
++    }
++    let stem = wanted.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
++    let extension = wanted.extension().map(|extension| format!(".{}", extension.to_string_lossy())).unwrap_or_default();
++    (1..)
++        .map(|number| wanted.with_file_name(format!("{stem} ({number}){extension}")))
++        .find(|candidate| !candidate.exists())
++        .unwrap_or_else(|| wanted.to_owned())
++}
++
++impl super::super::EngineHost {
++    pub(super) fn linux_downloads(&mut self, profile: ProfileId, extension_id: &str, method: &str, args: &[Value]) -> Result<Value, String> {
++        let install = self
++            .linux_extensions
++            .profiles
++            .get_mut(&profile)
++            .and_then(|state| state.install_mut(extension_id))
++            .ok_or("The extension is not running.")?;
++        if !install.permissions.iter().any(|permission| permission == "downloads") {
++            return Err("The extension has no permission to download.".into());
++        }
++        let downloads = &mut install.downloads;
++        match method {
++            "begin" => {
++                if downloads.pending.len() >= MAX_PENDING {
++                    return Err("Too many downloads at once.".into());
++                }
++                // Without a configured Downloads folder, ~/Downloads, as browsers do.
++                let folder = dirs::download_dir()
++                    .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
++                    .ok_or("There is no Downloads folder.")?;
++                let path = folder.join(relative_path(args.first().and_then(Value::as_str).unwrap_or_default())?);
++                downloads.next += 1;
++                downloads.pending.insert(downloads.next, Pending { path, data: Vec::new() });
++                Ok(json!(downloads.next))
++            }
++            "chunk" => {
++                let token = args.first().and_then(Value::as_u64).unwrap_or(0);
++                let piece = args.get(1).and_then(Value::as_str).unwrap_or_default();
++                let bytes = base64::engine::general_purpose::STANDARD.decode(piece).map_err(|_| "The download data is not valid.")?;
++                let pending = downloads.pending.get_mut(&token).ok_or("No such download.")?;
++                if pending.data.len() + bytes.len() > MAX_FILE_BYTES {
++                    downloads.pending.remove(&token);
++                    return Err("The file is larger than an extension may save.".into());
++                }
++                pending.data.extend_from_slice(&bytes);
++                Ok(Value::Null)
++            }
++            "finish" => {
++                let token = args.first().and_then(Value::as_u64).unwrap_or(0);
++                let pending = downloads.pending.remove(&token).ok_or("No such download.")?;
++                if let Some(parent) = pending.path.parent() {
++                    std::fs::create_dir_all(parent).map_err(|failure| failure.to_string())?;
++                }
++                let path = free_path(&pending.path);
++                std::fs::write(&path, &pending.data).map_err(|failure| failure.to_string())?;
++                super::trace!("{extension_id} saved {} bytes to {}", pending.data.len(), path.display());
++                // The extension listens for the change once it has the ID: tell
++                // it a moment after the answer.
++                let item = json!({ "id": token, "filename": path.to_string_lossy(), "state": "complete", "fileSize": pending.data.len() });
++                let changed = json!({ "id": token, "state": { "previous": "in_progress", "current": "complete" } });
++                let (views, extension_id) = (install.own_views(), extension_id.to_owned());
++                gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(100), move || {
++                    for view in views {
++                        let endpoint = Endpoint { view, frame: 0 };
++                        raise(&endpoint, &extension_id, "downloads.onCreated", json!([item]));
++                        raise(&endpoint, &extension_id, "downloads.onChanged", json!([changed]));
++                    }
++                });
++                Ok(json!(token))
++            }
++            "cancel" => {
++                let token = args.first().and_then(Value::as_u64).unwrap_or(0);
++                downloads.pending.remove(&token);
++                Ok(Value::Null)
++            }
++            "search" | "erase" => Ok(json!([])),
++            _ => Err(format!("downloads.{method} is not available on Linux yet.")),
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn names_stay_inside_downloads() {
++        assert_eq!(relative_path("uisnap/page__x/shot.png").unwrap(), PathBuf::from("uisnap/page__x/shot.png"));
++        assert_eq!(relative_path("a:b?.txt").unwrap(), PathBuf::from("a_b_.txt"));
++        assert!(relative_path("../etc/passwd").is_err());
++        assert!(relative_path("a/../../b").is_err());
++        assert!(relative_path("").is_err());
++        assert_eq!(relative_path("/abs/file").unwrap(), PathBuf::from("abs/file"));
++    }
++
++    #[test]
++    fn an_existing_file_is_never_replaced() {
++        let dir = tempfile::tempdir().unwrap();
++        let wanted = dir.path().join("shot.png");
++        assert_eq!(free_path(&wanted), wanted);
++        std::fs::write(&wanted, b"x").unwrap();
++        assert_eq!(free_path(&wanted), dir.path().join("shot (1).png"));
++    }
++}
+diff --git a/crates/zephium-engine/src/host/webext_linux/mod.rs b/crates/zephium-engine/src/host/webext_linux/mod.rs
+index 9d0a456e..d6e2dde7 100644
+--- a/crates/zephium-engine/src/host/webext_linux/mod.rs
++++ b/crates/zephium-engine/src/host/webext_linux/mod.rs
+@@ -9,7 +9,9 @@
+ 
+ mod action;
+ mod api;
++mod capture;
+ mod dnr;
++mod downloads;
+ mod events;
+ mod registered;
+ mod routing;
+@@ -103,6 +105,7 @@ pub(super) struct Install {
+     /// The manifest's content scripts, and those registered at run time.
+     manifest_groups: Vec<zephium_webext_linux::content::Group>,
+     pub(super) registered: registered::Registered,
++    pub(super) downloads: downloads::Downloads,
+     pub(super) action: action::ActionState,
+     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
+     pub(super) popup: Option<action::Popup>,
+@@ -169,6 +172,7 @@ impl Install {
+             dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
+             manifest_groups,
+             registered: registered::Registered::open(storage.as_deref()),
++            downloads: downloads::Downloads::default(),
+             storage: api::Storage::open(storage)?,
+             action: action::ActionState::from_manifest(&manifest, &load.root),
+             alarms: HashMap::new(),
+diff --git a/crates/zephium-engine/src/lib.rs b/crates/zephium-engine/src/lib.rs
+index 666d425b..7978554b 100644
+--- a/crates/zephium-engine/src/lib.rs
++++ b/crates/zephium-engine/src/lib.rs
+@@ -15,7 +15,6 @@ mod data_kinds;
+ #[cfg(all(target_os = "macos", feature = "native-agentic-work-resource-probe"))]
+ mod diagnostics;
+ mod erasure;
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
+ mod fullscreen;
+ mod haptics;
+ #[cfg(any(target_os = "windows", test))]
+@@ -3023,7 +3022,7 @@ impl Engine for WebviewEngine {
+     }
+ 
+     fn fullscreen_presentation(&self) -> zephium_core::ports::engine::FullscreenPresentation {
+-        if cfg!(target_os = "windows") {
++        if cfg!(not(target_os = "macos")) {
+             zephium_core::ports::engine::FullscreenPresentation::FillHostWindow
+         } else {
+             zephium_core::ports::engine::FullscreenPresentation::OwnWindow
+@@ -3050,15 +3049,7 @@ impl Engine for WebviewEngine {
+     }
+ 
+     fn exit_fullscreen(&self, id: ItemId) -> NativeDispatch {
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+-        {
+-            self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
+-        }
+-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+-        {
+-            let _ = id;
+-            NativeDispatch::Unsupported
+-        }
++        self.run_for_active_item(id, move |host| host.exit_fullscreen(id))
+     }
+ 
+     fn stop_media_capture(
+diff --git a/crates/zephium-engine/src/platform/linux/fullscreen.rs b/crates/zephium-engine/src/platform/linux/fullscreen.rs
+new file mode 100644
+index 00000000..6a2791b4
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/fullscreen.rs
+@@ -0,0 +1,140 @@
++//! Element fullscreen of tabs on WebKitGTK. WebKit reports a page entering
++//! and leaving fullscreen through two signals; the state is kept on the view,
++//! so the host reads it again when the change reaches it, as on the other
++//! platforms. WebKit's own handling then fills the toplevel window, which the
++//! shell's layout follows by giving the page the whole window. While a page
++//! is fullscreen, Escape on the window asks it to leave, wherever the
++//! keyboard focus is.
++
++use std::cell::RefCell;
++use std::rc::Rc;
++
++use gtk::glib::prelude::ObjectExt;
++use gtk::prelude::{Cast, WidgetExt};
++use webkit2gtk::{WebView, WebViewExt};
++use wry::WebViewExtUnix;
++
++use crate::fullscreen::NativeFullscreen;
++
++/// Where the state lives on the WebView: a `bool`, true while fullscreen.
++const STATE_KEY: &str = "zephium-fullscreen";
++/// The world the exit request runs in, out of the page's reach.
++const EXIT_WORLD: &str = "zephium-fullscreen";
++
++/// Holds the two signal connections for as long as the view lives.
++pub(crate) struct FullscreenObserver {
++    view: WebView,
++    signals: Vec<gtk::glib::SignalHandlerId>,
++    escape: EscapeKey,
++}
++
++impl Drop for FullscreenObserver {
++    fn drop(&mut self) {
++        for signal in self.signals.drain(..) {
++            self.view.disconnect(signal);
++        }
++        release(&self.escape);
++    }
++}
++
++/// The window's Escape handler while the page is fullscreen.
++type EscapeKey = Rc<RefCell<Option<(gtk::Window, gtk::glib::SignalHandlerId)>>>;
++
++fn listen_for_escape(view: &WebView, escape: &EscapeKey) {
++    release(escape);
++    let Some(window) = view.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) else {
++        return;
++    };
++    let page = view.clone();
++    let signal = window.connect_key_press_event(move |_, event| {
++        if event.keyval() != gtk::gdk::keys::constants::Escape {
++            return gtk::glib::Propagation::Proceed;
++        }
++        trace("Escape while fullscreen");
++        ask_to_leave(&page);
++        gtk::glib::Propagation::Stop
++    });
++    *escape.borrow_mut() = Some((window, signal));
++}
++
++fn release(escape: &EscapeKey) {
++    if let Some((window, signal)) = escape.borrow_mut().take() {
++        window.disconnect(signal);
++    }
++}
++
++fn set_state(view: &WebView, active: bool) {
++    // SAFETY: this private key is only ever written and read as `bool`.
++    unsafe { view.set_data(STATE_KEY, active) };
++}
++
++pub(crate) fn install_fullscreen_observer(view: &wry::WebView, changed: impl Fn() + 'static) -> Result<FullscreenObserver, String> {
++    let view = view.webview();
++    if let Some(settings) = WebViewExt::settings(&view) {
++        use webkit2gtk::SettingsExt;
++        settings.set_enable_fullscreen(true);
++    }
++    set_state(&view, false);
++    let changed = Rc::new(changed);
++    let escape: EscapeKey = Rc::default();
++    let (on_enter, entered_escape) = (changed.clone(), escape.clone());
++    let enter = view.connect_enter_fullscreen(move |view| {
++        trace("entering");
++        set_state(view, true);
++        listen_for_escape(view, &entered_escape);
++        on_enter();
++        // Not handled here: WebKit goes on to fill the window.
++        false
++    });
++    let left_escape = escape.clone();
++    let leave = view.connect_leave_fullscreen(move |view| {
++        trace("leaving");
++        set_state(view, false);
++        release(&left_escape);
++        changed();
++        false
++    });
++    Ok(FullscreenObserver { view, signals: vec![enter, leave], escape })
++}
++
++pub(crate) fn fullscreen_state(view: &wry::WebView) -> NativeFullscreen {
++    // SAFETY: as in `set_state`.
++    let active = unsafe { view.webview().data::<bool>(STATE_KEY).map(|state| *state.as_ref()) };
++    if active == Some(true) {
++        NativeFullscreen::Active
++    } else {
++        NativeFullscreen::Inactive
++    }
++}
++
++/// Asks the page to leave fullscreen, from a world of its own so the page
++/// cannot replace `exitFullscreen` to keep the screen.
++pub(crate) fn exit_fullscreen(view: &wry::WebView) {
++    if fullscreen_state(view) != NativeFullscreen::Active {
++        return;
++    }
++    ask_to_leave(&view.webview());
++}
++
++/// The request, from the private world; the page's own world is the
++/// fallback when that one cannot run it.
++fn ask_to_leave(view: &WebView) {
++    const LEAVE: &str = "document.fullscreenElement ? (document.exitFullscreen(), true) : false";
++    let page = view.clone();
++    view.evaluate_javascript(LEAVE, Some(EXIT_WORLD), None, None::<&gtk::gio::Cancellable>, move |result| {
++        if let Err(error) = result {
++            trace(&format!("leaving from the private world failed: {error}"));
++            page.evaluate_javascript(LEAVE, None, None, None::<&gtk::gio::Cancellable>, |result| {
++                if let Err(error) = result {
++                    trace(&format!("leaving from the page's world failed: {error}"));
++                }
++            });
++        }
++    });
++}
++
++fn trace(step: &str) {
++    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++        eprintln!("fullscreen: {step}");
++    }
++}
+diff --git a/crates/zephium-engine/src/platform/linux/mod.rs b/crates/zephium-engine/src/platform/linux/mod.rs
+index 58a196fb..fb0bce4e 100644
+--- a/crates/zephium-engine/src/platform/linux/mod.rs
++++ b/crates/zephium-engine/src/platform/linux/mod.rs
+@@ -6,6 +6,8 @@ mod amo_button;
+ mod content_filter;
+ pub(crate) mod extension_channel;
+ mod find;
++mod fullscreen;
++mod web_features;
+ mod stage;
+ pub(crate) mod store_button;
+ 
+@@ -26,6 +28,7 @@ pub(crate) use content_filter::{
+     ContentPolicyCompilationCancellation, ContentPolicyRegistration, NativeContentPolicy,
+ };
+ pub(crate) use find::{find, FindReport, FindSession};
++pub(crate) use fullscreen::{exit_fullscreen, fullscreen_state, install_fullscreen_observer, FullscreenObserver};
+ pub use stage::Stage;
+ 
+ use std::cell::RefCell;
+@@ -439,6 +442,7 @@ pub fn configure(
+         // SAFETY: see the typed private-key invariant above.
+         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+     }
++    web_features::enable(&view);
+     // Private profiles run no extensions, so they take no add-on either.
+     if !expected_ephemeral {
+         addon_download::offer_for_review(&view, partition.profile());
+diff --git a/crates/zephium-engine/src/platform/linux/web_features.rs b/crates/zephium-engine/src/platform/linux/web_features.rs
+new file mode 100644
+index 00000000..eb4e32de
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/web_features.rs
+@@ -0,0 +1,50 @@
++//! The web platform features a modern site expects, where WebKitGTK leaves
++//! them off by default: WebRTC (calls, voice chat), WebGPU and encrypted media.
++
++use std::ffi::{c_char, c_void, CStr};
++
++use gtk::glib::translate::ToGlibPtr;
++use webkit2gtk::{SettingsExt, WebView, WebViewExt};
++
++/// Features turned on by their WebKit identifier.
++const ENABLED_FEATURES: [&str; 1] = ["WebGPU"];
++
++// WebKitGTK's feature API (2.42) has no Rust binding yet.
++unsafe extern "C" {
++    fn webkit_settings_get_all_features() -> *mut c_void;
++    fn webkit_feature_list_get_length(list: *mut c_void) -> usize;
++    fn webkit_feature_list_get(list: *mut c_void, index: usize) -> *mut c_void;
++    fn webkit_feature_list_unref(list: *mut c_void);
++    fn webkit_feature_get_identifier(feature: *mut c_void) -> *const c_char;
++    fn webkit_settings_set_feature_enabled(settings: *mut webkit2gtk::ffi::WebKitSettings, feature: *mut c_void, enabled: i32);
++}
++
++pub(crate) fn enable(view: &WebView) {
++    let Some(settings) = WebViewExt::settings(view) else {
++        return;
++    };
++    settings.set_enable_webrtc(true);
++    settings.set_enable_mediasource(true);
++    settings.set_enable_encrypted_media(true);
++    let raw_settings: *mut webkit2gtk::ffi::WebKitSettings = settings.to_glib_none().0;
++    // SAFETY: the list is owned here until unreffed; features are borrowed
++    // from it and identifiers are static strings.
++    unsafe {
++        let list = webkit_settings_get_all_features();
++        if list.is_null() {
++            return;
++        }
++        for index in 0..webkit_feature_list_get_length(list) {
++            let feature = webkit_feature_list_get(list, index);
++            let identifier = webkit_feature_get_identifier(feature);
++            if identifier.is_null() {
++                continue;
++            }
++            let identifier = CStr::from_ptr(identifier).to_str().unwrap_or_default();
++            if ENABLED_FEATURES.contains(&identifier) {
++                webkit_settings_set_feature_enabled(raw_settings, feature, 1);
++            }
++        }
++        webkit_feature_list_unref(list);
++    }
++}
+diff --git a/crates/zephium-webext-linux/js/runtime.js b/crates/zephium-webext-linux/js/runtime.js
+index 799453d1..2f3626bd 100644
+--- a/crates/zephium-webext-linux/js/runtime.js
++++ b/crates/zephium-webext-linux/js/runtime.js
+@@ -70,6 +70,30 @@
+     };
+   }
+ 
++  // A promise delivered as a method's answer would be.
++  function settle(pending, callback) {
++    if (!callback) return pending;
++    pending.then((value) => callback(value), (error) => withLastError(error, () => callback()));
++    return undefined;
++  }
++
++  // downloads.download: the file is read here, where its blob or data URL
++  // lives, and sent to the browser in pieces small enough for the channel.
++  async function saveDownload(options) {
++    const response = await fetch(options.url);
++    if (!response.ok) throw new Error(`The download failed: ${response.status}`);
++    const bytes = new Uint8Array(await response.arrayBuffer());
++    const name = options.filename || new URL(options.url).pathname.split("/").pop() || "download";
++    const token = await request("downloads.begin", [name]);
++    const piece = 36 * 1024; // 48 KiB once in base64, inside the channel's limit
++    for (let at = 0; at < bytes.length; at += piece) {
++      let text = "";
++      for (const byte of bytes.subarray(at, at + piece)) text += String.fromCharCode(byte);
++      await request("downloads.chunk", [token, btoa(text)]);
++    }
++    return request("downloads.finish", [token]);
++  }
++
+   // An answer known in this context, delivered as a method's would be.
+   function answer(value) {
+     return (...args) => {
+@@ -310,7 +334,7 @@
+       query: undefined, get: undefined, getCurrent: undefined, create: undefined, update: undefined,
+       remove: undefined, reload: undefined, duplicate: undefined, sendMessage: undefined,
+       executeScript: undefined, insertCSS: undefined, removeCSS: undefined,
+-      connect: connector("tabs.connect"), captureVisibleTab: undefined, detectLanguage: undefined,
++      connect: connector("tabs.connect"), captureVisibleTab: undefined, captureTab: undefined, detectLanguage: undefined,
+     }, ["onCreated", "onUpdated", "onActivated", "onRemoved", "onReplaced", "onMoved", "onHighlighted"]);
+     tabs.TAB_ID_NONE = -1;
+ 
+@@ -392,6 +416,10 @@
+       webRequest: namespace("webRequest", { handlerBehaviorChanged: answer(undefined) },
+         ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
+           "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]),
++      downloads: namespace("downloads", {
++        download: (options, callback) => settle(saveDownload(options || {}), callback),
++        search: undefined, erase: undefined, cancel: undefined,
++      }, ["onCreated", "onChanged", "onErased", "onDeterminingFilename"]),
+       idle: namespace("idle", { queryState: answer("active"), setDetectionInterval: answer(undefined) }, ["onStateChanged"]),
+       management: namespace("management", {
+         getSelf: answer({
