@@ -2,6 +2,7 @@
 //! composition root; the stage positions them and draws the drop indicator.
 
 mod addon_download;
+mod amo_button;
 mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
@@ -441,6 +442,7 @@ pub fn configure(
     // Private profiles run no extensions, so they take no add-on either.
     if !expected_ephemeral {
         addon_download::offer_for_review(&view, partition.profile());
+        amo_button::install(&view);
     }
 
     // Extensions never run in private profiles, so their contexts get no
