@@ -26,7 +26,11 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   // Inspection that may have missed form or editor state. It matters only once
   // the user has entered input here: without input there is nothing a reload
   // could lose that the page did not produce itself.
-  var incomplete = false;
+  // beforeunload listeners added with addEventListener are invisible here:
+  // games' tamper checks refuse a wrapped addEventListener, even a proxy that
+  // changes nothing, and stop loading (krunker.io). So after input the page
+  // counts as possibly guarded and stays.
+  var incomplete = true;
   var now = Performance.prototype.now;
   var lastActivity = Reflect.apply(now, performance, []);
   var lastEdit = -Infinity;
@@ -38,7 +42,6 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
   var focusedFrames = [];
   var MAX_DRAWN_CANVASES = 16;
   var drawnCanvases = [];
-  var beforeUnload = [];
   var audioContexts = new Set();
   var captureTracks = new Set();
   var MAX_TRACKED = 4096;
@@ -149,9 +152,6 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
 
   var eventTarget = globalThis.EventTarget && EventTarget.prototype;
   var originalAdd = eventTarget && eventTarget.addEventListener;
-  var originalRemove = eventTarget && eventTarget.removeEventListener;
-  var wrappedAdd = originalAdd;
-  var wrappedRemove = originalRemove;
   function activity() { lastActivity = apply(now, performance, []); }
   for (var event of ['input','change','keydown','pointerdown','scroll','visibilitychange']) {
     apply(originalAdd, document, [event, activity, {capture:true,passive:true}]);
@@ -244,41 +244,6 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
       remember(focusedFrames, MAX_FOCUSED_FRAMES, frame);
     } catch (_) { uncertain = true; }
   }, {capture:true,passive:true}]);
-  function captureOption(options) {
-    return options === true || (!!options && typeof options === 'object' && options.capture === true);
-  }
-  try {
-    wrappedAdd = disguise(originalAdd, function(self, args) {
-      var type = args[0], listener = args[1], options = args[2];
-      if ((self === undefined || self === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
-        var capture = captureOption(options);
-        var found = false;
-        for (var i = 0; i < beforeUnload.length; i++) {
-          if (beforeUnload[i][0] === listener && beforeUnload[i][1] === capture) { found = true; break; }
-        }
-        if (!found) {
-          if (beforeUnload.length < MAX_TRACKED) beforeUnload.push([listener, capture]);
-          else incomplete = true;
-        }
-      }
-      return apply(originalAdd, self, args);
-    });
-    wrappedRemove = disguise(originalRemove, function(self, args) {
-      var type = args[0], listener = args[1], options = args[2];
-      var result = apply(originalRemove, self, args);
-      if ((self === undefined || self === globalThis) && String(type).toLowerCase() === 'beforeunload' && listener != null) {
-        var capture = captureOption(options);
-        for (var i = 0; i < beforeUnload.length; i++) {
-          if (beforeUnload[i][0] === listener && beforeUnload[i][1] === capture) {
-            beforeUnload.splice(i, 1); break;
-          }
-        }
-      }
-      return result;
-    });
-    eventTarget.addEventListener = wrappedAdd;
-    eventTarget.removeEventListener = wrappedRemove;
-  } catch (_) { uncertain = true; }
 
   function observeStream(stream) {
     try {
@@ -344,11 +309,6 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     var localUncertain = uncertain;
     var localIncomplete = incomplete;
     try {
-      // Monitoring libraries commonly wrap these again; only beforeunload
-      // tracking depends on them, and beforeunload is gated on input.
-      if (eventTarget.addEventListener !== wrappedAdd || eventTarget.removeEventListener !== wrappedRemove) {
-        localIncomplete = true;
-      }
       for (var h = 0; h < mediaHooks.length; h++) {
         var hook = mediaHooks[h];
         if (hook && hook[0][hook[1]] !== hook[2]) localUncertain = true;
@@ -481,7 +441,7 @@ pub(super) const DISCARD_SAFETY_BOOTSTRAP_JS: &str = r#"(function(){
     // A script-filled field or an editor the user never typed into reloads
     // to the same state, so user-data facts all require input first.
     return (callGetter(readyState, document) === 'complete' ? 1 : 0) |
-      ((editedEver && (beforeUnload.length !== 0 || typeof globalThis.onbeforeunload === 'function')) ? 2 : 0) |
+      ((editedEver && typeof globalThis.onbeforeunload === 'function') ? 2 : 0) |
       ((editedEver && dirtyForm) ? 4 : 0) | ((editedEver && editable) ? 8 : 0) | (media ? 16 : 0) |
       (audioContext ? 32 : 0) | (capture ? 64 : 0) | (frameInput ? 128 : 0) |
       ((localUncertain || (editedEver && localIncomplete)) ? 256 : 0) |

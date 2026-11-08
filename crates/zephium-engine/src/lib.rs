@@ -2788,7 +2788,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
     fn answer_web_extension_data(
         &self,
         profile: ProfileId,
@@ -2802,7 +2802,7 @@ impl Engine for WebviewEngine {
         }))
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", all(unix, not(target_os = "macos"))))]
     fn web_extension_data_changed(
         &self,
         profile: ProfileId,

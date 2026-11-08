@@ -116,12 +116,18 @@ pub(crate) fn connect_drag_event(webview: &WebView, handler: Box<dyn Fn(DragDrop
     webview.connect_drag_drop(move |_, ctx, x, y, time| {
       if controller.state() == DragControllerState::Leaving {
         if let Some(paths) = controller.take_paths() {
-          ctx.drop_finish(true, time);
           controller.leave();
-          return controller.call(DragDropEvent::Drop {
+          let handled = controller.call(DragDropEvent::Drop {
             paths,
             position: (x, y),
           });
+          // Finish the drop only when the embedder took it. Otherwise WebKit
+          // still has to read the data: finished here, the page never got
+          // the dropped files.
+          if handled {
+            ctx.drop_finish(true, time);
+          }
+          return handled;
         }
       }
 

@@ -429,7 +429,7 @@ fn popup_size(measured: &str) -> Option<(i32, i32)> {
 }
 
 /// A JavaScript string result as Rust text.
-fn js_string(value: &impl gtk::glib::ObjectType) -> Option<String> {
+pub(super) fn js_string(value: &impl gtk::glib::ObjectType) -> Option<String> {
     let value = value.as_ptr().cast::<std::ffi::c_void>();
     // SAFETY: a live JSCValue borrowed for this call.
     if unsafe { jsc_value_is_string(value) } == 0 {

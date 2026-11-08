@@ -6,7 +6,9 @@
 //! start, the content scripts the web-process plugin runs, and storage). The
 //! design and the protocol are in the Linux port's docs/extensions.md.
 
+pub mod browser_data;
 pub mod content;
+pub(crate) mod data;
 pub mod dnr;
 pub mod info;
 pub mod storage;

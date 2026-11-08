@@ -8,6 +8,8 @@ publish = false
 
 [dependencies]
 serde_json.workspace = true
+zephium-core.workspace = true
+url.workspace = true
 zephium-webext = { path = "../zephium-webext" }
 
 [dev-dependencies]

@@ -3411,7 +3411,6 @@ pub(super) fn raw_content_permission_on(
         {
             wry::PermissionResponse::Prompt
         }
-        Kind::MediaKeySystemAccess if !windows => wry::PermissionResponse::Allow,
         _ => wry::PermissionResponse::Deny,
     }
 }
