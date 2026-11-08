@@ -10,6 +10,7 @@
 mod action;
 mod api;
 mod capture;
+mod commands;
 mod dnr;
 mod downloads;
 mod events;
@@ -72,8 +73,10 @@ pub(super) struct ProfileExtensions {
     packages: scheme::Packages,
     installs: HashMap<ExtensionInstallId, Install>,
     routing: routing::Routing,
-    /// The browser window that last had focus: a popup, in a window of its
-    /// own, still belongs to it, as Chrome's "current window".
+    /// The installed extensions' keyboard commands, read by each tab.
+    shortcuts: commands::Shortcuts,
+    /// The browser window that last had focus, Chrome's "current window"
+    /// for a popup while the popup has the keyboard.
     last_focused: Option<zephium_core::ids::WindowId>,
 }
 
@@ -269,6 +272,9 @@ impl super::EngineHost {
             }
             state.context = Some(context);
         }
+        if let Some(state) = self.linux_extensions.profiles.get(&profile) {
+            commands::listen(&view.webview(), profile, state.shortcuts.clone());
+        }
         self.linux_extensions_sync(profile);
         // The view is not among the profile's tabs until it is built.
         self.linux_dnr_add_to(profile, &view.webview());
@@ -302,6 +308,8 @@ impl super::EngineHost {
                 install.background = start_background(context, channel, install);
             }
         }
+        *state.shortcuts.borrow_mut() =
+            state.installs.values().flat_map(|install| commands::shortcuts(&install.extension_id, &install.manifest)).collect();
         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
         self.linux_extensions.set_navigation(profile, ids);
         self.linux_dnr_sync(profile);

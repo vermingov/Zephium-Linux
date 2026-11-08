@@ -498,7 +498,7 @@ impl super::super::EngineHost {
         self.linux_all_tabs(profile).into_iter().find(|tab| tab["id"] == number)
     }
 
-    fn linux_tab_of_view(&self, profile: ProfileId, view: &WebView) -> Option<ItemId> {
+    pub(super) fn linux_tab_of_view(&self, profile: ProfileId, view: &WebView) -> Option<ItemId> {
         use wry::WebViewExtUnix;
         self.views
             .iter()
