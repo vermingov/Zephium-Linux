@@ -1,6 +1,5 @@
 //! OS-driven residency input. No process sampling; only a critically low
 //! state on Windows is read again periodically, to notice it easing.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use tauri::Manager;
 
 pub(crate) fn install(app: &tauri::AppHandle) {
@@ -10,8 +9,98 @@ pub(crate) fn install(app: &tauri::AppHandle) {
             app.manage(monitor);
         }
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    if let Some(shell) = app.try_state::<zephium_app::Handle>() {
+        linux::install(shell.inner().clone());
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     let _ = app;
+}
+
+/// GLib's memory monitor: the low-memory-monitor daemon or the kernel's
+/// pressure stall information. It only ever warns, so a quiet spell of
+/// `EASE_SECONDS` after the last warning reads as normal again.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::cell::{Cell, RefCell};
+    use std::time::{Duration, Instant};
+
+    use gtk::glib::translate::FromGlibPtrFull;
+    use gtk::glib::{self, gobject_ffi, ObjectExt};
+    use zephium_app::{Command, Handle};
+    use zephium_core::ports::engine::MemoryPressure;
+
+    const EASE_SECONDS: u32 = 60;
+
+    // The binding sits behind gio's v2_64 feature; the function is in every
+    // GLib since 2.64.
+    unsafe extern "C" {
+        fn g_memory_monitor_dup_default() -> *mut gobject_ffi::GObject;
+    }
+
+    thread_local! {
+        /// The monitor stops warning once its last reference goes.
+        static MONITOR: RefCell<Option<glib::Object>> = const { RefCell::new(None) };
+        static STATE: Cell<(MemoryPressure, Option<Instant>)> = const { Cell::new((MemoryPressure::Normal, None)) };
+    }
+
+    /// GLib's levels: 50 low, 100 medium, 255 critical.
+    fn tier(level: i32) -> MemoryPressure {
+        if level >= 100 {
+            MemoryPressure::Critical
+        } else {
+            MemoryPressure::Warning
+        }
+    }
+
+    pub(super) fn install(shell: Handle) {
+        // SAFETY: returns a full reference to GLib's default monitor.
+        let monitor = unsafe { glib::Object::from_glib_full(g_memory_monitor_dup_default()) };
+        let warned = shell.clone();
+        monitor.connect_local("low-memory-warning", false, move |values| {
+            // SAFETY: the signal's second value is its GMemoryMonitorWarningLevel enum.
+            let level = values.get(1).map_or(0, |value| unsafe { gobject_ffi::g_value_get_enum(value.as_ptr()) });
+            let (current, _) = STATE.get();
+            // A milder warning does not lift a critical state early.
+            let next = if current == MemoryPressure::Critical { current } else { tier(level) };
+            STATE.set((next, Some(Instant::now())));
+            if next != current {
+                let _ = warned.dispatch(Command::SetMemoryPressure(next));
+                ease(warned.clone());
+            }
+            None
+        });
+        MONITOR.with(|slot| *slot.borrow_mut() = Some(monitor));
+    }
+
+    /// Back to normal once warnings have stopped for a while.
+    fn ease(shell: Handle) {
+        glib::timeout_add_seconds_local_once(EASE_SECONDS, move || {
+            let (current, last) = STATE.get();
+            let quiet = last.is_none_or(|last| last.elapsed() >= Duration::from_secs(EASE_SECONDS.into()));
+            if current == MemoryPressure::Normal {
+                return;
+            }
+            if quiet {
+                STATE.set((MemoryPressure::Normal, None));
+                let _ = shell.dispatch(Command::SetMemoryPressure(MemoryPressure::Normal));
+            } else {
+                ease(shell);
+            }
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn glib_levels_map_to_tiers() {
+            assert_eq!(tier(50), MemoryPressure::Warning);
+            assert_eq!(tier(100), MemoryPressure::Critical);
+            assert_eq!(tier(255), MemoryPressure::Critical);
+        }
+    }
 }
 
 #[cfg(target_os = "macos")]

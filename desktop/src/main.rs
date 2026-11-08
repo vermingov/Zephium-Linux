@@ -5,6 +5,8 @@
 )]
 
 fn main() -> std::process::ExitCode {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fixed_malloc_thresholds();
     #[cfg(all(target_os = "macos", feature = "work-product"))]
     zephium_app::work_commands::private_guard_main();
     #[cfg(all(target_os = "macos", feature = "work-integration-qa", debug_assertions))]
@@ -101,4 +103,19 @@ fn main() -> std::process::ExitCode {
     }
     zephium_desktop_lib::run();
     std::process::ExitCode::SUCCESS
+}
+
+/// glibc raises its mmap threshold each time a large block is freed, up to
+/// 32 MB. Compiling the blocker lists frees many such buffers, so later large
+/// buffers come from the heap and stay there: about 80 MB more resident after
+/// every list compile. Fixed thresholds keep large blocks in mmap, returned to
+/// the system when freed.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn fixed_malloc_thresholds() {
+    const THRESHOLD: libc::c_int = 256 * 1024;
+    // SAFETY: mallopt only changes allocator tuning; called before any thread.
+    unsafe {
+        libc::mallopt(libc::M_MMAP_THRESHOLD, THRESHOLD);
+        libc::mallopt(libc::M_TRIM_THRESHOLD, THRESHOLD);
+    }
 }

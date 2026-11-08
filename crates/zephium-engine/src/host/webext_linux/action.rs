@@ -320,7 +320,7 @@ fn open_popup(
         settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
         // With the trace on, the popup's console goes to the log, as the
         // background's does.
-        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        if super::tracing() {
             settings.set_enable_write_console_messages_to_stdout(true);
         }
     }
@@ -370,16 +370,21 @@ fn open_popup(
 
     // Once loaded, the popup takes the page's own size, and follows it while
     // open: a popup's page grows and shrinks as its script draws.
+    // One follower per loaded page: a reload retires the one before it.
     let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
+    let loads = std::rc::Rc::new(std::cell::Cell::new(0_u64));
     view.connect_load_changed(move |view, event| {
         if event != webkit2gtk::LoadEvent::Finished {
             return;
         }
         let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
         fit_popup(&view, parent.clone(), frame.clone(), anchor);
+        let load = loads.get() + 1;
+        loads.set(load);
+        let current = loads.clone();
         gtk::glib::timeout_add_local(std::time::Duration::from_millis(400), move || {
-            // Closed: the frame left the stage.
-            if frame.parent().is_none() {
+            // Closed (the frame left the stage), or a newer page follows.
+            if frame.parent().is_none() || current.get() != load {
                 return gtk::glib::ControlFlow::Break;
             }
             fit_popup(&view, parent.clone(), frame.clone(), anchor);

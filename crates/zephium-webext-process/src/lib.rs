@@ -14,8 +14,14 @@
 /// The runtime's step-by-step log in the web process, when the browser runs
 /// with `ZEPHIUM_WEBEXT_TRACE` set and WebKit passes it on.
 #[cfg(all(unix, not(target_os = "macos")))]
+/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
+}
+
 pub(crate) fn trace(line: std::fmt::Arguments) {
-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+    if tracing() {
         eprintln!("webext plugin: {line}");
     }
 }
