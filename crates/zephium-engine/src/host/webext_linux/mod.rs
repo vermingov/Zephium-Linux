@@ -9,6 +9,7 @@
 
 mod action;
 mod api;
+mod browser_data;
 mod capture;
 mod commands;
 mod cookies;
@@ -53,6 +54,8 @@ pub(super) struct LinuxExtensions {
     navigation: HashMap<ProfileId, super::permits::ExtensionNavigationGrants>,
     /// Numbers the tab and window requests this runtime raises.
     next_request: u64,
+    /// History, bookmark and session requests waiting for the shell.
+    data: browser_data::Pending,
 }
 
 impl LinuxExtensions {
@@ -321,6 +324,7 @@ impl super::EngineHost {
         self.linux_extensions.set_navigation(profile, ids);
         self.linux_dnr_sync(profile);
         self.linux_menu_table_refresh(profile);
+        self.linux_data_interest(profile);
     }
 
     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {

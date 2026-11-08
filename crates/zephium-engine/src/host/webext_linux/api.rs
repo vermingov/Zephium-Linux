@@ -100,6 +100,9 @@ impl super::super::EngineHost {
                 let method = api.trim_start_matches("cookies.").to_owned();
                 return self.linux_cookies(profile, message, id, &method, &args);
             }
+            data if zephium_webext_linux::browser_data::handles(data) => {
+                return self.linux_browser_data(profile, message, id, &api, &args);
+            }
             "tabs.captureVisibleTab" | "tabs.captureTab" => {
                 return self.linux_capture(profile, message, id, &api, &args);
             }

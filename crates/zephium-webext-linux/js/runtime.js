@@ -418,6 +418,43 @@
         ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred",
           "onHistoryStateUpdated", "onReferenceFragmentUpdated"]),
     });
+    // The browser's own stores, read and written by the shell; the argument
+    // objects are the macOS port's, whose translation the browser shares.
+    const data = (api, fields, callback) => settle(request(api, [fields]), callback);
+    Object.assign(chrome, {
+      history: namespace("history", {
+        search: (details, callback) => data("history.search", { details }, callback),
+        getVisits: (details, callback) => data("history.getVisits", { details }, callback),
+        addUrl: (details, callback) => data("history.addUrl", { details }, callback),
+        deleteUrl: (details, callback) => data("history.deleteUrl", { details }, callback),
+        deleteRange: (details, callback) => data("history.deleteRange", { details }, callback),
+        deleteAll: (callback) => data("history.deleteAll", { details: {} }, callback),
+      }, ["onVisited", "onVisitRemoved", "onTitleChanged"]),
+      bookmarks: namespace("bookmarks", {
+        getTree: (callback) => data("bookmarks.getTree", {}, callback),
+        getSubTree: (id, callback) => data("bookmarks.getSubTree", { id }, callback),
+        getChildren: (id, callback) => data("bookmarks.getChildren", { id }, callback),
+        get: (ids, callback) => data("bookmarks.get", { ids: [].concat(ids) }, callback),
+        getRecent: (count, callback) => data("bookmarks.getRecent", { count }, callback),
+        search: (query, callback) => data("bookmarks.search", { details: query }, callback),
+        create: (bookmark, callback) => data("bookmarks.create", { details: bookmark || {} }, callback),
+        update: (id, changes, callback) => data("bookmarks.update", { id, details: changes || {} }, callback),
+        move: (id, destination, callback) => data("bookmarks.move", { id, details: destination || {} }, callback),
+        remove: (id, callback) => data("bookmarks.remove", { id }, callback),
+        removeTree: (id, callback) => data("bookmarks.removeTree", { id }, callback),
+      }, ["onCreated", "onChanged", "onMoved", "onRemoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]),
+      sessions: namespace("sessions", {
+        getRecentlyClosed: (filter, callback) => typeof filter === "function"
+          ? data("sessions.getRecentlyClosed", {}, filter)
+          : data("sessions.getRecentlyClosed", { filter }, callback),
+        getDevices: (filter, callback) => settle(Promise.resolve([]), typeof filter === "function" ? filter : callback),
+        restore: (sessionId, callback) => typeof sessionId === "function"
+          ? data("sessions.restore", {}, sessionId)
+          : data("sessions.restore", { sessionId }, callback),
+      }, ["onChanged"]),
+      topSites: namespace("topSites", { get: (callback) => data("topSites.get", {}, callback) }),
+    });
+    chrome.sessions.MAX_SESSION_RESULTS = 25;
     // Present so a background that listens at start keeps running; WebKitGTK
     // gives the port no hook into requests, so these events never fire.
     Object.assign(chrome, {
