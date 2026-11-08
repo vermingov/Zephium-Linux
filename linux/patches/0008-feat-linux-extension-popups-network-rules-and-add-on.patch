@@ -1,0 +1,2662 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 01:41:45 +0100
+Subject: [PATCH 8/8] feat(linux): extension popups, network rules and add-ons
+ from the stores
+
+- Popups open inside the browser window, as a view on the stage's layer
+  above the tab pages and under their button, rendered in software, sized
+  to their page as Chrome sizes them, and closed by Escape or when focus
+  leaves. A popup's "current window" is the browser window it came from.
+- Content-script CSS from the manifest goes in at document_start.
+- Tab and window events: the differences between two of the shell's
+  snapshots of windows and tabs.
+- declarativeNetRequest: enabled static rulesets, dynamic and session
+  rules compile into one WebKit content-blocker list on every tab of the
+  profile; rules WebKit cannot express are left out.
+- scripting.registerContentScripts and its siblings.
+- The Chrome Web Store's in-page button, as on macOS, in a script world of
+  its own.
+- addons.mozilla.org's "Download Firefox" button becomes "Add to
+  Zephium"; a .xpi from the store is fetched and offered for the same
+  review as a dropped file.
+- Extensions never script the add-on stores.
+- API members extensions use at start answer instead of being undefined.
+---
+ Cargo.lock                                    |  12 +
+ crates/zephium-app/src/shell/engine_events.rs |   8 +-
+ crates/zephium-core/src/ports/engine.rs       |   6 +
+ .../zephium-engine/src/host/construction.rs   |  18 +-
+ .../src/host/extension_browser_surface.rs     |   2 +
+ crates/zephium-engine/src/host/mod.rs         |   4 +-
+ .../zephium-engine/src/host/store_button.rs   |  20 +-
+ .../src/host/webext_linux/action.rs           | 185 +++++++--
+ .../src/host/webext_linux/api.rs              |  52 ++-
+ .../src/host/webext_linux/dnr.rs              | 365 ++++++++++++++++++
+ .../src/host/webext_linux/events.rs           | 151 ++++++++
+ .../src/host/webext_linux/mod.rs              |  49 ++-
+ .../src/host/webext_linux/registered.rs       | 192 +++++++++
+ crates/zephium-engine/src/lib.rs              |   7 +-
+ .../src/platform/linux/addon_download.rs      | 144 +++++++
+ .../src/platform/linux/amo_button.rs          |  28 ++
+ .../src/platform/linux/amo_page.js            |  48 +++
+ .../src/platform/linux/content_filter.rs      |  19 +
+ .../zephium-engine/src/platform/linux/mod.rs  |   9 +
+ .../src/platform/linux/store_button.rs        | 154 ++++++++
+ crates/zephium-ipc/src/lib.rs                 |   2 +
+ crates/zephium-webext-linux/js/runtime.js     |  46 +++
+ crates/zephium-webext-linux/src/content.rs    |  79 +++-
+ crates/zephium-webext-linux/src/dnr.rs        | 341 ++++++++++++++++
+ crates/zephium-webext-linux/src/lib.rs        |   1 +
+ crates/zephium-webext-process/src/matching.rs |  26 +-
+ crates/zephium-webext-process/src/worlds.rs   |   5 +-
+ desktop/src/lib.rs                            |   6 +
+ 28 files changed, 1907 insertions(+), 72 deletions(-)
+ create mode 100644 crates/zephium-engine/src/host/webext_linux/dnr.rs
+ create mode 100644 crates/zephium-engine/src/host/webext_linux/events.rs
+ create mode 100644 crates/zephium-engine/src/host/webext_linux/registered.rs
+ create mode 100644 crates/zephium-engine/src/platform/linux/addon_download.rs
+ create mode 100644 crates/zephium-engine/src/platform/linux/amo_button.rs
+ create mode 100644 crates/zephium-engine/src/platform/linux/amo_page.js
+ create mode 100644 crates/zephium-engine/src/platform/linux/store_button.rs
+ create mode 100644 crates/zephium-webext-linux/src/dnr.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index 56cbfe2f..be249d92 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -7676,6 +7676,7 @@ dependencies = [
+  "zephium-store",
+  "zephium-voice",
+  "zephium-webext",
++ "zephium-webext-linux",
+  "zephium-webext-macos",
+  "zephium-work-composition",
+ ]
+@@ -7706,6 +7707,7 @@ dependencies = [
+  "serde",
+  "serde_json",
+  "sha2 0.10.9",
++ "soup3",
+  "tempfile",
+  "url",
+  "webkit2gtk",
+@@ -7719,6 +7721,7 @@ dependencies = [
+  "zephium-blocker",
+  "zephium-core",
+  "zephium-webext",
++ "zephium-webext-linux",
+  "zephium-webext-macos",
+  "zephium-webext-process",
+  "zeroize",
+@@ -7890,6 +7893,15 @@ dependencies = [
+  "zip",
+ ]
+ 
++[[package]]
++name = "zephium-webext-linux"
++version = "0.1.0"
++dependencies = [
++ "serde_json",
++ "tempfile",
++ "zephium-webext",
++]
++
+ [[package]]
+ name = "zephium-webext-macos"
+ version = "0.1.0"
+diff --git a/crates/zephium-app/src/shell/engine_events.rs b/crates/zephium-app/src/shell/engine_events.rs
+index 28864eb5..1168e22c 100644
+--- a/crates/zephium-app/src/shell/engine_events.rs
++++ b/crates/zephium-app/src/shell/engine_events.rs
+@@ -659,6 +659,11 @@ impl Shell {
+             EngineEvent::StoreButtonClicked { id, extension } => {
+                 self.store_button_clicked(id, extension);
+             }
++            EngineEvent::WebExtensionPackageFetched { path, .. } => {
++                (self.emit)(Projection::WebExtensionPackageFetched(
++                    path.to_string_lossy().into_owned(),
++                ));
++            }
+             EngineEvent::FindResult {
+                 id,
+                 query,
+@@ -836,7 +841,8 @@ impl Shell {
+             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
+             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
+             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
+-            EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
++            EngineEvent::WebExtensionSettled { profile, .. }
++            | EngineEvent::WebExtensionPackageFetched { profile, .. } => Some(*profile),
+             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
+             EngineEvent::WebExtensionAccessRemoved(removal) => Some(removal.profile),
+             // Answered even during retirement, so the extension hears why.
+diff --git a/crates/zephium-core/src/ports/engine.rs b/crates/zephium-core/src/ports/engine.rs
+index 80456cc3..794a3c21 100644
+--- a/crates/zephium-core/src/ports/engine.rs
++++ b/crates/zephium-core/src/ports/engine.rs
+@@ -1648,6 +1648,12 @@ pub enum EngineEvent {
+         install: ExtensionInstallId,
+         result: Result<WebExtensionLoaded, String>,
+     },
++    /// An extension package the person downloaded from an add-on store, saved
++    /// at `path` for the install review.
++    WebExtensionPackageFetched {
++        profile: ProfileId,
++        path: std::path::PathBuf,
++    },
+     /// An extension asked at run time for access the user must approve;
+     /// answered through [`EnginePort::answer_web_extension_access`].
+     WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),
+diff --git a/crates/zephium-engine/src/host/construction.rs b/crates/zephium-engine/src/host/construction.rs
+index 15bc32e5..d78190f6 100644
+--- a/crates/zephium-engine/src/host/construction.rs
++++ b/crates/zephium-engine/src/host/construction.rs
+@@ -2427,6 +2427,22 @@ impl EngineHost {
+                 ),
+             )
+         };
++        #[cfg(all(unix, not(target_os = "macos")))]
++        let store_button = if matches!(partition, Partition::Ephemeral(_)) {
++            super::store_button::StoreButtonSlot::default()
++        } else {
++            let tab = id.clone();
++            super::store_button::StoreButtonSlot::native(
++                crate::platform::imp::store_button::StoreButton::install(
++                    &wry::WebViewExtUnix::webview(&view),
++                    move |message| {
++                        let tab = tab.get();
++                        let _ =
++                            super::try_with(move |host| host.store_button_message(tab, message));
++                    },
++                ),
++            )
++        };
+         #[cfg(target_os = "windows")]
+         let request_witness = crate::platform::imp::RequestWitness::install(
+             wry::WebViewExtWindows::webview(&view),
+@@ -2887,7 +2903,7 @@ impl EngineHost {
+             #[cfg(target_os = "windows")]
+             native_terminal_failure: self.native_terminal_failure.clone(),
+             find: None,
+-            #[cfg(target_os = "macos")]
++            #[cfg(unix)]
+             store_button,
+             #[cfg(target_os = "windows")]
+             store_button: Default::default(),
+diff --git a/crates/zephium-engine/src/host/extension_browser_surface.rs b/crates/zephium-engine/src/host/extension_browser_surface.rs
+index a3204391..54e663ad 100644
+--- a/crates/zephium-engine/src/host/extension_browser_surface.rs
++++ b/crates/zephium-engine/src/host/extension_browser_surface.rs
+@@ -146,6 +146,8 @@ impl EngineHost {
+         }
+         #[cfg(target_os = "windows")]
+         self.reconcile_windows_extension_popup(&surface);
++        #[cfg(all(unix, not(target_os = "macos")))]
++        self.linux_surface_changed(&surface);
+         self.extension_browser_surfaces.insert(profile, surface);
+         true
+     }
+diff --git a/crates/zephium-engine/src/host/mod.rs b/crates/zephium-engine/src/host/mod.rs
+index 9b89b56a..460bbb94 100644
+--- a/crates/zephium-engine/src/host/mod.rs
++++ b/crates/zephium-engine/src/host/mod.rs
+@@ -67,7 +67,7 @@ mod scriptlets;
+ mod scripts;
+ mod site_permissions;
+ mod stages;
+-#[cfg(any(target_os = "macos", target_os = "windows"))]
++#[cfg(any(unix, target_os = "windows"))]
+ mod store_button;
+ mod style_worker;
+ #[cfg(target_os = "macos")]
+@@ -307,7 +307,7 @@ struct ObservedView {
+     native_terminal_failure: Arc<dyn Fn(&'static str) + Send + Sync>,
+     // Before `view`, so a running search is stopped while its view lives.
+     find: Option<crate::platform::imp::FindSession>,
+-    #[cfg(any(target_os = "macos", target_os = "windows"))]
++    #[cfg(any(unix, target_os = "windows"))]
+     store_button: store_button::StoreButtonSlot,
+     // Before `view`: the Ask panel's reader removes its scripts and
+     // handlers from the view's controller while the view lives.
+diff --git a/crates/zephium-engine/src/host/store_button.rs b/crates/zephium-engine/src/host/store_button.rs
+index 58d91a5f..f6a10cd5 100644
+--- a/crates/zephium-engine/src/host/store_button.rs
++++ b/crates/zephium-engine/src/host/store_button.rs
+@@ -27,8 +27,8 @@ const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
+ pub(super) struct StoreButtonSlot {
+     shown: Option<StoreButton>,
+     last_click: Option<Instant>,
+-    #[cfg(target_os = "macos")]
+-    native: Option<crate::platform::macos::store_button::StoreButton>,
++    #[cfg(unix)]
++    native: Option<crate::platform::imp::store_button::StoreButton>,
+     #[cfg(target_os = "windows")]
+     poll: Option<crate::platform::imp::ContentPolicyTimeout>,
+     // The armed poll is the fast one, so the window coming back has nothing
+@@ -42,9 +42,9 @@ pub(super) struct StoreButtonSlot {
+ }
+ 
+ impl StoreButtonSlot {
+-    #[cfg(target_os = "macos")]
++    #[cfg(unix)]
+     pub(super) fn native(
+-        native: Option<crate::platform::macos::store_button::StoreButton>,
++        native: Option<crate::platform::imp::store_button::StoreButton>,
+     ) -> Self {
+         Self {
+             native,
+@@ -104,6 +104,10 @@ impl EngineHost {
+     }
+ 
+     pub(crate) fn show_store_button(&mut self, id: ItemId, button: StoreButton) {
++        #[cfg(all(unix, not(target_os = "macos")))]
++        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++            eprintln!("store button: asked to show {} on a view showing {:?}", button.extension, self.committed_listing(id));
++        }
+         let label_chars = button.label.chars().count();
+         if label_chars == 0
+             || label_chars > MAX_STORE_BUTTON_LABEL_CHARS
+@@ -153,7 +157,7 @@ impl EngineHost {
+         let Some(state) = view.store_button.shown.as_ref().map(encode) else {
+             return;
+         };
+-        #[cfg(target_os = "macos")]
++        #[cfg(unix)]
+         if let Some(native) = &view.store_button.native {
+             native.show(&state);
+         }
+@@ -191,13 +195,13 @@ impl EngineHost {
+         );
+     }
+ 
+-    #[cfg(target_os = "macos")]
++    #[cfg(unix)]
+     pub(super) fn store_button_message(
+         &mut self,
+         id: ItemId,
+-        message: crate::platform::macos::store_button::StoreMessage,
++        message: crate::platform::imp::store_button::StoreMessage,
+     ) {
+-        use crate::platform::macos::store_button::StoreMessage;
++        use crate::platform::imp::store_button::StoreMessage;
+         match message {
+             StoreMessage::Ready => self.send_store_button(id),
+             StoreMessage::Clicked(extension) => self.store_button_clicked(id, extension.as_str()),
+diff --git a/crates/zephium-engine/src/host/webext_linux/action.rs b/crates/zephium-engine/src/host/webext_linux/action.rs
+index f8d119e0..d130a45a 100644
+--- a/crates/zephium-engine/src/host/webext_linux/action.rs
++++ b/crates/zephium-engine/src/host/webext_linux/action.rs
+@@ -1,5 +1,5 @@
+ //! Toolbar actions: what each extension's button shows, and what clicking it
+-//! does, opening its popup in a popover or raising `action.onClicked`.
++//! does, opening its popup or raising `action.onClicked`.
+ 
+ use std::collections::hash_map::DefaultHasher;
+ use std::collections::HashMap;
+@@ -8,7 +8,7 @@ use std::path::Path;
+ 
+ use gtk::prelude::*;
+ use serde_json::{json, Value};
+-use webkit2gtk::{WebView, WebViewExt};
++use webkit2gtk::{HardwareAccelerationPolicy, SettingsExt, WebView, WebViewExt};
+ use zephium_core::extensions::{
+     ExtensionActionIcon, ExtensionActionRejection, ExtensionActionRequest, ExtensionActionRevision, ExtensionActionScope,
+     ExtensionActionSettlement, ExtensionActionSnapshot, ExtensionActionSnapshotSettlement, ExtensionActionState,
+@@ -24,6 +24,28 @@ use crate::platform::imp::extension_channel;
+ 
+ /// The popup's size until its page says otherwise.
+ const POPUP_SIZE: (i32, i32) = (380, 520);
++/// Chrome's bounds for a popup sized to its page.
++const POPUP_MIN: i32 = 25;
++const POPUP_MAX: (i32, i32) = (800, 600);
++/// The page's preferred size, as Chrome sizes a popup: its widest line,
++/// whatever the window's width now, and its height at that width.
++const MEASURE_POPUP: &str = r#"(() => {
++  const root = document.documentElement;
++  const saved = root.style.width;
++  root.style.width = "max-content";
++  // The root's own box: scrollHeight never drops below the window's height.
++  const box = root.getBoundingClientRect();
++  const size = `${Math.ceil(box.width)},${Math.ceil(box.height)}`;
++  root.style.width = saved;
++  return size;
++})()"#;
++
++// javascriptcore-rs is Wry's private dependency; the one string read a
++// measured popup needs goes through JSC's stable C ABI.
++unsafe extern "C" {
++    fn jsc_value_is_string(value: *mut std::ffi::c_void) -> i32;
++    fn jsc_value_to_string_as_bytes(value: *mut std::ffi::c_void) -> *mut gtk::glib::ffi::GBytes;
++}
+ const ICON_SIZE: i32 = 32;
+ 
+ /// One extension's toolbar action. Each property has a default and per-tab
+@@ -104,16 +126,19 @@ fn icon_from_file(path: &Path) -> Option<ExtensionActionIcon> {
+     ExtensionActionIcon::from_rgba(rgba).ok()
+ }
+ 
+-/// An open popup: a view of the extension's popup page in a popover.
++/// An open popup: the extension's popup page in the browser window, above
++/// the tab pages and under its button, as Chrome shows it. A view of its own
++/// on the stage's layer, not a popover or a window: a popover took the page
++/// views down, and a window is the compositor's to place and focus.
+ pub(super) struct Popup {
+     pub(super) view: WebView,
+-    popover: gtk::Popover,
++    frame: gtk::Frame,
++    parent: gtk::Fixed,
+ }
+ 
+ impl Popup {
+     pub(super) fn close(self) {
+-        self.popover.popdown();
+-        self.popover.remove(&self.view);
++        self.parent.remove(&self.frame);
+         self.view.try_close();
+     }
+ }
+@@ -267,7 +292,7 @@ impl super::super::EngineHost {
+         tabs.into_iter().find(|candidate| number.is_some_and(|number| candidate["id"] == number)).unwrap_or(Value::Null)
+     }
+ 
+-    /// The popover closed itself (a click outside, or the page closed it).
++    /// The popup closed itself (focus left it, Escape, or the page closed it).
+     fn linux_popup_closed(&mut self, profile: ProfileId, extension_id: &str, view: &WebView) {
+         if let Some(install) = self.linux_extensions.profiles.get_mut(&profile).and_then(|state| state.install_mut(extension_id)) {
+             if install.popup.as_ref().is_some_and(|popup| &popup.view == view) {
+@@ -289,24 +314,128 @@ fn open_popup(
+     extension_id: String,
+ ) -> Popup {
+     let view = WebView::with_context(context);
+-    view.set_size_request(POPUP_SIZE.0, POPUP_SIZE.1);
++    // Popups are small; software rendering keeps them off the GPU paths
++    // that a nested view had trouble with.
++    if let Some(settings) = WebViewExt::settings(&view) {
++        settings.set_hardware_acceleration_policy(HardwareAccelerationPolicy::Never);
++        // With the trace on, the popup's console goes to the log, as the
++        // background's does.
++        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++            settings.set_enable_write_console_messages_to_stdout(true);
++        }
++    }
++    view.set_background_color(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
+     extension_channel::listen(&view, channel);
+-    let popover = gtk::Popover::new(Some(parent));
+-    popover.set_pointing_to(&gtk::gdk::Rectangle::new(anchor.x as i32, anchor.y as i32, anchor.width.max(1.0) as i32, anchor.height.max(1.0) as i32));
+-    popover.add(&view);
++
++    // A thin edge, so the popup reads apart from the page under it.
++    let frame = gtk::Frame::new(None);
++    frame.set_shadow_type(gtk::ShadowType::In);
++    frame.add(&view);
++    view.set_size_request(POPUP_SIZE.0, POPUP_SIZE.1);
++    let (x, y) = popup_place(parent, anchor, POPUP_SIZE);
++    // Added last, it draws above the tab pages.
++    parent.put(&frame, x, y);
++
++    // Chrome closes a popup when it loses focus, and on Escape. Only after
++    // it had focus once: it can be told it lost focus before it was shown.
++    let dismiss = {
++        let (view, extension_id) = (view.clone(), extension_id);
++        move || {
++            let (view, extension_id) = (view.clone(), extension_id.clone());
++            super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
++        }
++    };
++    let focused = std::rc::Rc::new(std::cell::Cell::new(false));
++    let had_focus = focused.clone();
++    view.connect_focus_in_event(move |_, _| {
++        had_focus.set(true);
++        gtk::glib::Propagation::Proceed
++    });
++    let on_focus_out = dismiss.clone();
++    view.connect_focus_out_event(move |_, _| {
++        if focused.get() {
++            on_focus_out();
++        }
++        gtk::glib::Propagation::Proceed
++    });
++    let on_escape = dismiss.clone();
++    view.connect_key_press_event(move |_, event| {
++        if event.keyval() == gtk::gdk::keys::constants::Escape {
++            on_escape();
++            return gtk::glib::Propagation::Stop;
++        }
++        gtk::glib::Propagation::Proceed
++    });
++    view.connect_close(move |_| dismiss());
++
++    // Once loaded, the popup takes the page's own size, and again once the
++    // page's script has drawn what it shows.
++    let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
++    view.connect_load_changed(move |view, event| {
++        if event != webkit2gtk::LoadEvent::Finished {
++            return;
++        }
++        for delay in [0, 250, 1000] {
++            let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
++            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
++                fit_popup(&view, parent, frame, anchor);
++            });
++        }
++    });
++
+     view.load_uri(url);
+-    let closed_view = view.clone();
+-    let closed_extension = extension_id.clone();
+-    popover.connect_closed(move |_| {
+-        let (view, extension_id) = (closed_view.clone(), closed_extension.clone());
+-        super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
++    frame.show_all();
++    view.grab_focus();
++    Popup { view, frame, parent: parent.clone() }
++}
++
++/// Size the popup to its page, keeping it under its button and inside the
++/// window.
++fn fit_popup(view: &WebView, parent: gtk::Fixed, frame: gtk::Frame, anchor: zephium_core::geometry::Rect) {
++    let sized = view.clone();
++    view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
++        if let Some(size) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
++            sized.set_size_request(size.0, size.1);
++            let (x, y) = popup_place(&parent, anchor, size);
++            parent.move_(&frame, x, y);
++        }
+     });
+-    // `window.close()` in the popup page closes the popover.
+-    let page_popover = popover.clone();
+-    view.connect_close(move |_| page_popover.popdown());
+-    view.show();
+-    popover.popup();
+-    Popup { view, popover }
++}
++
++/// Where a popup of `size` goes: under its button, moved in as far as it
++/// takes to stay inside the window.
++fn popup_place(parent: &gtk::Fixed, anchor: zephium_core::geometry::Rect, size: (i32, i32)) -> (i32, i32) {
++    const MARGIN: i32 = 4;
++    let room = parent.allocation();
++    let fit = |start: i32, length: i32, available: i32| start.min(available - length - MARGIN).max(0);
++    (
++        fit(anchor.x as i32, size.0, room.width()),
++        fit((anchor.y + anchor.height) as i32 + MARGIN, size.1, room.height()),
++    )
++}
++
++/// `"width,height"` as the popup's size within Chrome's bounds.
++fn popup_size(measured: &str) -> Option<(i32, i32)> {
++    let (width, height) = measured.split_once(',')?;
++    let (width, height): (i32, i32) = (width.trim().parse().ok()?, height.trim().parse().ok()?);
++    Some((width.clamp(POPUP_MIN, POPUP_MAX.0), height.clamp(POPUP_MIN, POPUP_MAX.1)))
++}
++
++/// A JavaScript string result as Rust text.
++fn js_string(value: &impl gtk::glib::ObjectType) -> Option<String> {
++    let value = value.as_ptr().cast::<std::ffi::c_void>();
++    // SAFETY: a live JSCValue borrowed for this call.
++    if unsafe { jsc_value_is_string(value) } == 0 {
++        return None;
++    }
++    // SAFETY: as above; the call hands over one GBytes reference, which
++    // `from_glib_full` takes.
++    let raw = unsafe { jsc_value_to_string_as_bytes(value) };
++    if raw.is_null() {
++        return None;
++    }
++    let bytes: gtk::glib::Bytes = unsafe { gtk::glib::translate::from_glib_full(raw) };
++    std::str::from_utf8(&bytes).ok().map(str::to_owned)
+ }
+ 
+ /// A revision that changes exactly when what the button shows changes.
+@@ -316,3 +445,15 @@ fn revision(label: &str, badge: &str, icon: Option<&ExtensionActionIcon>, enable
+     icon.map(|icon| format!("{icon:?}")).hash(&mut hasher);
+     ExtensionActionRevision::new(hasher.finish() | 1)
+ }
++
++#[cfg(test)]
++mod tests {
++    use super::popup_size;
++
++    #[test]
++    fn popups_take_their_page_size_within_chromes_bounds() {
++        assert_eq!(popup_size("320,240"), Some((320, 240)));
++        assert_eq!(popup_size("4000,3"), Some((800, 25)));
++        assert_eq!(popup_size("wide"), None);
++    }
++}
+diff --git a/crates/zephium-engine/src/host/webext_linux/api.rs b/crates/zephium-engine/src/host/webext_linux/api.rs
+index 0fa47292..268daf2f 100644
+--- a/crates/zephium-engine/src/host/webext_linux/api.rs
++++ b/crates/zephium-engine/src/host/webext_linux/api.rs
+@@ -16,7 +16,7 @@ use zephium_core::extensions::{
+ use zephium_core::ids::{ItemId, ProfileId};
+ use zephium_core::ports::engine::EngineEvent;
+ use zephium_webext_linux::storage::{Area, Changes, LOCAL_QUOTA};
+-use zephium_webext_process::matching::any_matches;
++use zephium_webext_process::matching::{any_matches, is_restricted};
+ 
+ use super::routing::{error, ok, raise, Endpoint};
+ use crate::platform::imp::extension_channel::{Message, SenderKind};
+@@ -77,9 +77,13 @@ impl super::super::EngineHost {
+             return message.reply(&error(id, "The extension is not running."));
+         }
+         let from = Endpoint { view: message.view.clone(), frame: message.frame_id };
++        super::trace!("{} calls {api}", message.extension_id);
+         let reply_with = |message: Message, result: Result<Value, String>| match result {
+             Ok(value) => message.reply(&ok(id, value)),
+-            Err(reason) => message.reply(&error(id, &reason)),
++            Err(reason) => {
++                super::trace!("{} call failed: {reason}", message.extension_id);
++                message.reply(&error(id, &reason))
++            }
+         };
+         // The calls that answer later take the request itself.
+         match api.as_str() {
+@@ -162,6 +166,9 @@ impl super::super::EngineHost {
+         };
+         let url = view.uri().map(|uri| uri.to_string()).unwrap_or_default();
+         let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
++        if is_restricted(&url) {
++            return Err("The extensions gallery cannot be scripted.".into());
++        }
+         let allowed = install.active_tabs.contains(&item) || any_matches(&install.hosts, &url);
+         if !allowed {
+             return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());
+@@ -197,6 +204,8 @@ impl super::super::EngineHost {
+                 _ => unsupported(api),
+             },
+             "storage" => self.linux_storage(profile, extension_id, method, args),
++            "declarativeNetRequest" => self.linux_dnr(profile, extension_id, method, args),
++            "scripting" => self.linux_registered(profile, extension_id, method, args),
+             "tabs" => self.linux_tabs(profile, message, from, method, args),
+             "windows" => self.linux_windows(profile, message, method, args),
+             "action" => self.linux_action_call(profile, extension_id, method, args),
+@@ -350,7 +359,8 @@ impl super::super::EngineHost {
+                 windows.into_iter().find(|window| window["id"] == wanted).ok_or_else(|| "No window with that id.".into())
+             }
+             "getCurrent" | "getLastFocused" => {
+-                let current = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone());
++                let current =
++                    self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
+                 Ok(windows
+                     .iter()
+                     .find(|window| current.as_ref().is_some_and(|id| &window["id"] == id))
+@@ -498,10 +508,25 @@ impl super::super::EngineHost {
+ 
+     fn linux_focused_tab(&self, profile: ProfileId) -> Option<ItemId> {
+         let surface = self.extension_browser_surfaces.get(&profile)?;
+-        let window = surface.windows().iter().find(|window| Some(window.id()) == surface.focused()).or(surface.windows().first())?;
++        let current = self.linux_current_window(profile);
++        let window = surface.windows().iter().find(|window| Some(window.id()) == current).or(surface.windows().first())?;
+         window.active()
+     }
+ 
++    /// The focused browser window, or the one that last was while a popup
++    /// window has focus.
++    fn linux_current_window(&self, profile: ProfileId) -> Option<zephium_core::ids::WindowId> {
++        let surface = self.extension_browser_surfaces.get(&profile)?;
++        let remembered = self.linux_extensions.profiles.get(&profile).and_then(|state| state.last_focused);
++        surface.focused().or(remembered).filter(|id| surface.windows().iter().any(|window| window.id() == *id))
++    }
++
++    fn linux_current_window_number(&mut self, profile: ProfileId) -> Option<Value> {
++        let window = self.linux_current_window(profile)?;
++        let state = self.linux_extensions.profiles.get_mut(&profile)?;
++        Some(json!(state.routing.windows.number(window)))
++    }
++
+     /// Every view of the profile's tabs, for events every context gets.
+     pub(super) fn linux_tab_views(&self, profile: ProfileId) -> Vec<WebView> {
+         use wry::WebViewExtUnix;
+@@ -549,10 +574,7 @@ impl super::super::EngineHost {
+         public_windows(&surface)
+             .map(|window| {
+                 let id = state.routing.windows.number(window.id());
+-                let mut value = json!({
+-                    "id": id, "focused": surface.focused() == Some(window.id()), "incognito": false,
+-                    "type": "normal", "state": "normal", "alwaysOnTop": false,
+-                });
++                let mut value = window_value(id, surface.focused() == Some(window.id()));
+                 if populate {
+                     value["tabs"] = Value::Array(window.tabs().iter().enumerate().map(|(index, tab)| tab_value(state, window, index, tab)).collect());
+                 }
+@@ -575,10 +597,8 @@ impl super::super::EngineHost {
+     }
+ 
+     fn linux_query_tabs(&mut self, profile: ProfileId, message: &Message, query: &Value) -> Vec<Value> {
+-        let current_window = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| {
+-            let windows = self.linux_all_windows(profile, false);
+-            windows.iter().find(|window| window["focused"] == true).map(|window| window["id"].clone())
+-        });
++        let current_window =
++            self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
+         let wants_current = query["currentWindow"].as_bool() == Some(true)
+             || query["lastFocusedWindow"].as_bool() == Some(true)
+             || query["windowId"].as_i64() == Some(-2);
+@@ -674,11 +694,15 @@ fn linux_notification(extension_id: &str, method: &str, args: &[Value]) -> Resul
+     }
+ }
+ 
+-fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
++pub(super) fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
+     surface.windows().iter().filter(|window| !window.is_private())
+ }
+ 
+-fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
++pub(super) fn window_value(id: i64, focused: bool) -> Value {
++    json!({ "id": id, "focused": focused, "incognito": false, "type": "normal", "state": "normal", "alwaysOnTop": false })
++}
++
++pub(super) fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
+     let active = window.active() == Some(tab.id());
+     json!({
+         "id": state.routing.tabs.number(tab.id()),
+diff --git a/crates/zephium-engine/src/host/webext_linux/dnr.rs b/crates/zephium-engine/src/host/webext_linux/dnr.rs
+new file mode 100644
+index 00000000..3d9b5fae
+--- /dev/null
++++ b/crates/zephium-engine/src/host/webext_linux/dnr.rs
+@@ -0,0 +1,365 @@
++//! `declarativeNetRequest`: an extension's static rulesets, dynamic rules and
++//! session rules, compiled into one WebKit content-blocker list that every
++//! tab of the profile carries.
++//!
++//! Reading rulesets and translating them can take a moment for a large
++//! blocker, so it runs off the main thread; WebKit compiles and caches the
++//! list. A newer change supersedes a list still compiling.
++
++use std::path::{Path, PathBuf};
++use std::sync::Arc;
++
++use serde_json::{json, Value};
++use sha2::{Digest, Sha256};
++use zephium_core::ids::ProfileId;
++use zephium_webext::manifest::Manifest;
++
++use crate::platform::imp::{
++    add_content_policy_to_view, compile_content_policy, remove_content_policy_from_view, NativeContentPolicy,
++};
++
++/// Chrome's limits, which extensions read and plan by.
++const MAX_ENABLED_STATIC_RULESETS: usize = 50;
++const MAX_DYNAMIC_RULES: usize = 30_000;
++const MAX_SESSION_RULES: usize = 5_000;
++const GUARANTEED_STATIC_RULES: usize = 30_000;
++/// What the extension keeps across restarts, in its storage folder.
++const STATE_FILE: &str = "declarative-net-request.json";
++
++pub(super) struct Rules {
++    rulesets: Vec<Ruleset>,
++    enabled: Vec<String>,
++    dynamic: Vec<Value>,
++    session: Vec<Value>,
++    state_file: Option<PathBuf>,
++    /// Bumped by every change, so only the newest list is applied.
++    revision: u64,
++    /// The list the profile's tabs carry.
++    pub(super) applied: Option<NativeContentPolicy>,
++}
++
++struct Ruleset {
++    id: String,
++    path: String,
++}
++
++impl Rules {
++    pub(super) fn from_manifest(manifest: &Manifest, storage: Option<&Path>) -> Self {
++        // Without the permission, the manifest's rulesets do nothing.
++        let permitted = manifest
++            .permissions()
++            .iter()
++            .any(|permission| permission == "declarativeNetRequest" || permission == "declarativeNetRequestWithHostAccess");
++        let resources = if permitted {
++            manifest.raw()["declarative_net_request"]["rule_resources"].as_array().cloned().unwrap_or_default()
++        } else {
++            Vec::new()
++        };
++        let rulesets: Vec<Ruleset> = resources
++            .iter()
++            .filter_map(|resource| Some(Ruleset { id: resource["id"].as_str()?.to_owned(), path: resource["path"].as_str()?.to_owned() }))
++            .collect();
++        let mut rules = Self {
++            enabled: resources
++                .iter()
++                .filter(|resource| resource["enabled"] == true)
++                .filter_map(|resource| resource["id"].as_str().map(str::to_owned))
++                .collect(),
++            rulesets,
++            dynamic: Vec::new(),
++            session: Vec::new(),
++            state_file: storage.map(|dir| dir.join(STATE_FILE)),
++            revision: 0,
++            applied: None,
++        };
++        let saved = rules.state_file.as_ref().and_then(|file| std::fs::read(file).ok());
++        if let Some(saved) = saved.and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok()) {
++            if let Some(enabled) = saved["enabled"].as_array() {
++                rules.enabled = enabled.iter().filter_map(|id| id.as_str().map(str::to_owned)).filter(|id| rules.has_ruleset(id)).collect();
++            }
++            rules.dynamic = saved["dynamic"].as_array().cloned().unwrap_or_default();
++        }
++        rules
++    }
++
++    fn has_ruleset(&self, id: &str) -> bool {
++        self.rulesets.iter().any(|ruleset| ruleset.id == id)
++    }
++
++    /// Whether there is anything to compile at all.
++    fn is_empty(&self) -> bool {
++        self.enabled.is_empty() && self.dynamic.is_empty() && self.session.is_empty()
++    }
++
++    fn save(&self) {
++        let Some(file) = &self.state_file else {
++            return;
++        };
++        if let Some(dir) = file.parent() {
++            let _ = std::fs::create_dir_all(dir);
++        }
++        let _ = std::fs::write(file, json!({ "enabled": self.enabled, "dynamic": self.dynamic }).to_string());
++    }
++
++    /// What a worker needs to build the list: the enabled rulesets' files,
++    /// then the dynamic and session rules.
++    fn sources(&self, root: &Path) -> (Vec<PathBuf>, Vec<Value>) {
++        let files = self
++            .rulesets
++            .iter()
++            .filter(|ruleset| self.enabled.contains(&ruleset.id))
++            .filter_map(|ruleset| zephium_webext::manifest::normalize_resource(&ruleset.path).map(|path| root.join(path)))
++            .collect();
++        (files, self.dynamic.iter().chain(&self.session).cloned().collect())
++    }
++
++    fn call(&mut self, method: &str, args: &[Value]) -> Result<(Value, bool), String> {
++        let options = args.first().cloned().unwrap_or(Value::Null);
++        Ok(match method {
++            "getEnabledRulesets" => (json!(self.enabled), false),
++            "updateEnabledRulesets" => {
++                let ids = |key: &str| -> Vec<String> {
++                    options[key].as_array().map(|list| list.iter().filter_map(|id| id.as_str().map(str::to_owned)).collect()).unwrap_or_default()
++                };
++                let (enable, disable) = (ids("enableRulesetIds"), ids("disableRulesetIds"));
++                if let Some(unknown) = enable.iter().chain(&disable).find(|id| !self.has_ruleset(id)) {
++                    return Err(format!("Invalid ruleset id: {unknown}."));
++                }
++                let mut enabled: Vec<String> = self.enabled.iter().filter(|id| !disable.contains(id)).cloned().collect();
++                for id in enable {
++                    if !enabled.contains(&id) {
++                        enabled.push(id);
++                    }
++                }
++                if enabled.len() > MAX_ENABLED_STATIC_RULESETS {
++                    return Err("The number of enabled static rulesets exceeds the limit.".into());
++                }
++                self.enabled = enabled;
++                (Value::Null, true)
++            }
++            "getDynamicRules" => (filtered(&self.dynamic, &options), false),
++            "getSessionRules" => (filtered(&self.session, &options), false),
++            "updateDynamicRules" => {
++                self.dynamic = updated(&self.dynamic, &options, MAX_DYNAMIC_RULES)?;
++                (Value::Null, true)
++            }
++            "updateSessionRules" => {
++                self.session = updated(&self.session, &options, MAX_SESSION_RULES)?;
++                (Value::Null, true)
++            }
++            "isRegexSupported" => {
++                let regex = options["regex"].as_str().unwrap_or_default();
++                if zephium_webext_linux::dnr::regex_supported(regex) {
++                    (json!({ "isSupported": true }), false)
++                } else {
++                    (json!({ "isSupported": false, "reason": "syntaxError" }), false)
++                }
++            }
++            "getAvailableStaticRuleCount" => (json!(GUARANTEED_STATIC_RULES), false),
++            "getDisabledRuleIds" => (json!([]), false),
++            "getMatchedRules" => (json!({ "rulesMatchedInfo": [] }), false),
++            "setExtensionActionOptions" | "updateStaticRules" => (Value::Null, false),
++            _ => return Err(format!("declarativeNetRequest.{method} is not available on Linux yet.")),
++        })
++    }
++}
++
++/// `getDynamicRules({ ruleIds })` and its session twin.
++fn filtered(rules: &[Value], options: &Value) -> Value {
++    match options["ruleIds"].as_array() {
++        Some(ids) => Value::Array(rules.iter().filter(|rule| ids.contains(&rule["id"])).cloned().collect()),
++        None => Value::Array(rules.to_vec()),
++    }
++}
++
++/// `updateDynamicRules({ removeRuleIds, addRules })`: removals first, and an
++/// added rule may not reuse a kept rule's ID.
++fn updated(rules: &[Value], options: &Value, limit: usize) -> Result<Vec<Value>, String> {
++    let remove = options["removeRuleIds"].as_array().cloned().unwrap_or_default();
++    let mut kept: Vec<Value> = rules.iter().filter(|rule| !remove.contains(&rule["id"])).cloned().collect();
++    for rule in options["addRules"].as_array().cloned().unwrap_or_default() {
++        if !rule["id"].is_u64() || rule["id"] == 0 {
++            return Err("Rule with an invalid id.".into());
++        }
++        if kept.iter().any(|existing| existing["id"] == rule["id"]) {
++            return Err(format!("Rule with id {} does not have a unique ID.", rule["id"]));
++        }
++        kept.push(rule);
++    }
++    if kept.len() > limit {
++        return Err("The number of rules exceeds the limit.".into());
++    }
++    Ok(kept)
++}
++
++/// The text of one compiled list, for WebKit's compiler.
++struct ListText(Arc<str>);
++
++impl zephium_core::blocker::DeclarativeRuleText for ListText {
++    fn len(&self) -> usize {
++        self.0.len()
++    }
++
++    fn load(&self) -> Option<Arc<str>> {
++        Some(self.0.clone())
++    }
++}
++
++/// Read and translate on a worker; the rules the files hold first.
++fn build(files: Vec<PathBuf>, extra: Vec<Value>) -> (String, usize) {
++    let mut rules: Vec<Value> = files
++        .iter()
++        .filter_map(|file| std::fs::read_to_string(file).ok())
++        .filter_map(|text| zephium_webext::manifest::parse_lenient(&text).ok())
++        .filter_map(|value| value.as_array().cloned())
++        .flatten()
++        .collect();
++    rules.extend(extra);
++    zephium_webext_linux::dnr::translate(&rules)
++}
++
++impl super::super::EngineHost {
++    /// A `declarativeNetRequest` call; a change rebuilds the list.
++    pub(super) fn linux_dnr(&mut self, profile: ProfileId, extension_id: &str, method: &str, args: &[Value]) -> Result<Value, String> {
++        let install = self
++            .linux_extensions
++            .profiles
++            .get_mut(&profile)
++            .and_then(|state| state.install_mut(extension_id))
++            .ok_or("The extension is not running.")?;
++        let (answer, changed) = install.dnr.call(method, args)?;
++        if changed {
++            if method != "updateSessionRules" {
++                install.dnr.save();
++            }
++            self.linux_dnr_rebuild(profile, extension_id);
++        }
++        Ok(answer)
++    }
++
++    /// Build `extension_id`'s list afresh and put it on the profile's tabs.
++    pub(super) fn linux_dnr_rebuild(&mut self, profile: ProfileId, extension_id: &str) {
++        let Some(install) = self.linux_extensions.profiles.get_mut(&profile).and_then(|state| state.install_mut(extension_id)) else {
++            return;
++        };
++        install.dnr.revision += 1;
++        let revision = install.dnr.revision;
++        if install.dnr.is_empty() {
++            self.linux_dnr_compiled(profile, extension_id.to_owned(), revision, None);
++            return;
++        }
++        let (files, extra) = install.dnr.sources(&install.root);
++        let extension_id = extension_id.to_owned();
++        let cache = crate::erasure::prepare_profile_directory(&self.profiles_root, profile).ok().map(|dir| dir.join("webext-dnr"));
++        std::thread::spawn(move || {
++            let (text, skipped) = build(files, extra);
++            gtk::glib::MainContext::default().invoke(move || {
++                super::super::dispatch::best_effort_with(move |host| {
++                    host.linux_dnr_translated(profile, extension_id, revision, text, skipped, cache);
++                });
++            });
++        });
++    }
++
++    fn linux_dnr_translated(&mut self, profile: ProfileId, extension_id: String, revision: u64, text: String, skipped: usize, cache: Option<PathBuf>) {
++        super::trace!("{extension_id}: network rules translated, {} bytes, {skipped} left out", text.len());
++        let Some(cache) = cache else {
++            return;
++        };
++        let _ = std::fs::create_dir_all(&cache);
++        let digest: [u8; 32] = Sha256::digest(text.as_bytes()).into();
++        let text: Arc<dyn zephium_core::blocker::DeclarativeRuleText> = Arc::new(ListText(text.into()));
++        // The compile runs in WebKit; its handle may go, the result still arrives.
++        let _ = compile_content_policy(&cache, text, digest, move |result| {
++            super::super::dispatch::best_effort_with(move |host| match result {
++                Ok(policy) => host.linux_dnr_compiled(profile, extension_id, revision, Some(policy)),
++                Err(error) => super::trace!("{extension_id}: network rules did not compile: {error:?}"),
++            });
++        });
++    }
++
++    fn linux_dnr_compiled(&mut self, profile: ProfileId, extension_id: String, revision: u64, policy: Option<NativeContentPolicy>) {
++        let views = self.linux_tab_views(profile);
++        let Some(install) = self.linux_extensions.profiles.get_mut(&profile).and_then(|state| state.install_mut(&extension_id)) else {
++            return;
++        };
++        if install.dnr.revision != revision {
++            return;
++        }
++        let previous = std::mem::replace(&mut install.dnr.applied, policy);
++        for view in &views {
++            if let Some(previous) = &previous {
++                remove_content_policy_from_view(view, previous);
++            }
++            if let Some(current) = &install.dnr.applied {
++                add_content_policy_to_view(view, current);
++            }
++        }
++        super::trace!("{extension_id}: network rules on {} tab(s)", views.len());
++    }
++
++    /// Every installed extension's list on every tab of the profile, as
++    /// after a new tab; adding a list twice keeps it once.
++    pub(super) fn linux_dnr_sync(&self, profile: ProfileId) {
++        let Some(state) = self.linux_extensions.profiles.get(&profile) else {
++            return;
++        };
++        let views = self.linux_tab_views(profile);
++        for policy in state.installs.values().filter_map(|install| install.dnr.applied.as_ref()) {
++            for view in &views {
++                add_content_policy_to_view(view, policy);
++            }
++        }
++    }
++
++    /// Every installed extension's list on a tab being built.
++    pub(super) fn linux_dnr_add_to(&self, profile: ProfileId, view: &webkit2gtk::WebView) {
++        let Some(state) = self.linux_extensions.profiles.get(&profile) else {
++            return;
++        };
++        for policy in state.installs.values().filter_map(|install| install.dnr.applied.as_ref()) {
++            add_content_policy_to_view(view, policy);
++        }
++    }
++
++    /// An extension stops: its list comes off the profile's tabs.
++    pub(super) fn linux_dnr_remove(&self, profile: ProfileId, policy: &NativeContentPolicy) {
++        for view in self.linux_tab_views(profile) {
++            remove_content_policy_from_view(&view, policy);
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn dynamic_updates_remove_first_and_refuse_duplicate_ids() {
++        let rules = vec![json!({ "id": 1 }), json!({ "id": 2 })];
++        let next = updated(&rules, &json!({ "removeRuleIds": [1], "addRules": [{ "id": 1 }, { "id": 3 }] }), 10).unwrap();
++        assert_eq!(next.iter().map(|rule| rule["id"].as_u64().unwrap()).collect::<Vec<_>>(), [2, 1, 3]);
++        assert!(updated(&rules, &json!({ "addRules": [{ "id": 2 }] }), 10).is_err());
++        assert!(updated(&rules, &json!({ "addRules": [{ "id": 3 }] }), 2).is_err());
++    }
++
++    #[test]
++    fn rulesets_follow_the_manifest_and_updates() {
++        let manifest = Manifest::from_value(json!({ "permissions": ["declarativeNetRequest"], "declarative_net_request": { "rule_resources": [
++            { "id": "ads", "enabled": true, "path": "ads.json" },
++            { "id": "privacy", "enabled": false, "path": "privacy.json" } ] } }));
++        let mut rules = Rules::from_manifest(&manifest, None);
++        assert_eq!(rules.call("getEnabledRulesets", &[]).unwrap().0, json!(["ads"]));
++        let change = json!({ "enableRulesetIds": ["privacy"], "disableRulesetIds": ["ads"] });
++        assert!(rules.call("updateEnabledRulesets", &[change]).unwrap().1);
++        assert_eq!(rules.enabled, ["privacy"]);
++        assert!(rules.call("updateEnabledRulesets", &[json!({ "enableRulesetIds": ["nope"] })]).is_err());
++    }
++
++    #[test]
++    fn without_the_permission_the_rulesets_do_nothing() {
++        let manifest = Manifest::from_value(json!({ "declarative_net_request": { "rule_resources": [
++            { "id": "ads", "enabled": true, "path": "ads.json" } ] } }));
++        assert!(Rules::from_manifest(&manifest, None).is_empty());
++    }
++}
+diff --git a/crates/zephium-engine/src/host/webext_linux/events.rs b/crates/zephium-engine/src/host/webext_linux/events.rs
+new file mode 100644
+index 00000000..5372b7fb
+--- /dev/null
++++ b/crates/zephium-engine/src/host/webext_linux/events.rs
+@@ -0,0 +1,151 @@
++//! Tab and window events. The shell publishes its windows and tabs as one
++//! snapshot whenever they change; what differs between two snapshots is what
++//! `tabs.on*` and `windows.on*` report.
++
++use serde_json::{json, Map, Value};
++use zephium_core::extensions::ExtensionBrowserSurface;
++
++use super::api::{public_windows, tab_value, window_value};
++use super::routing::{raise, Endpoint};
++
++/// The tab fields whose changes `tabs.onUpdated` reports.
++const UPDATED_FIELDS: [&str; 7] = ["status", "url", "title", "pinned", "audible", "discarded", "mutedInfo"];
++
++/// The public windows and their tabs in Chrome's numbers and shape.
++struct Snapshot {
++    windows: Vec<i64>,
++    tabs: Vec<Value>,
++    /// `windows.WINDOW_ID_NONE` when no public window has focus.
++    focused: i64,
++}
++
++fn snapshot(state: &mut super::ProfileExtensions, surface: &ExtensionBrowserSurface) -> Snapshot {
++    let mut snapshot = Snapshot { windows: Vec::new(), tabs: Vec::new(), focused: -1 };
++    for window in public_windows(surface) {
++        let id = state.routing.windows.number(window.id());
++        if surface.focused() == Some(window.id()) {
++            snapshot.focused = id;
++        }
++        snapshot.windows.push(id);
++        snapshot.tabs.extend(window.tabs().iter().enumerate().map(|(index, tab)| tab_value(state, window, index, tab)));
++    }
++    snapshot
++}
++
++/// The events that lead from `before` to `after`, in the order Chrome raises
++/// them: windows and tabs appear, change, and go.
++fn events(before: &Snapshot, after: &Snapshot) -> Vec<(&'static str, Value)> {
++    let find = |tabs: &[Value], id: &Value| tabs.iter().find(|tab| tab["id"] == *id).cloned();
++    let mut events = Vec::new();
++    for window in after.windows.iter().filter(|window| !before.windows.contains(window)) {
++        events.push(("windows.onCreated", json!([window_value(*window, after.focused == *window)])));
++    }
++    for tab in &after.tabs {
++        let old = find(&before.tabs, &tab["id"]);
++        match &old {
++            None => events.push(("tabs.onCreated", json!([tab]))),
++            Some(old) => {
++                let changes: Map<String, Value> =
++                    UPDATED_FIELDS.iter().filter(|field| old[**field] != tab[**field]).map(|field| ((*field).to_owned(), tab[*field].clone())).collect();
++                if !changes.is_empty() {
++                    events.push(("tabs.onUpdated", json!([tab["id"], changes, tab])));
++                }
++            }
++        }
++        if tab["active"] == true && old.is_none_or(|old| old["active"] != true) {
++            events.push(("tabs.onActivated", json!([{ "tabId": tab["id"], "windowId": tab["windowId"] }])));
++        }
++    }
++    for tab in &before.tabs {
++        if find(&after.tabs, &tab["id"]).is_none() {
++            let closing = tab["windowId"].as_i64().is_some_and(|window| !after.windows.contains(&window));
++            events.push(("tabs.onRemoved", json!([tab["id"], { "windowId": tab["windowId"], "isWindowClosing": closing }])));
++        }
++    }
++    for window in before.windows.iter().filter(|window| !after.windows.contains(window)) {
++        events.push(("windows.onRemoved", json!([window])));
++    }
++    if before.focused != after.focused {
++        events.push(("windows.onFocusChanged", json!([after.focused])));
++    }
++    events
++}
++
++impl super::super::EngineHost {
++    /// The shell is about to replace `next.profile()`'s snapshot with `next`:
++    /// tell that profile's extensions what changed. The first snapshot is the
++    /// state they start from, not news.
++    pub(in crate::host) fn linux_surface_changed(&mut self, next: &ExtensionBrowserSurface) {
++        let profile = next.profile();
++        if let (Some(focused), Some(state)) = (next.focused(), self.linux_extensions.profiles.get_mut(&profile)) {
++            state.last_focused = Some(focused);
++        }
++        let Some(previous) = self.extension_browser_surfaces.get(&profile).cloned() else {
++            return;
++        };
++        let Some(state) = self.linux_extensions.profiles.get_mut(&profile) else {
++            return;
++        };
++        if state.installs.is_empty() {
++            return;
++        }
++        let (before, after) = (snapshot(state, &previous), snapshot(state, next));
++        let events = events(&before, &after);
++        if events.is_empty() {
++            return;
++        }
++        super::trace!("{} tab and window event(s)", events.len());
++        for install in state.installs.values() {
++            for view in install.own_views() {
++                let endpoint = Endpoint { view, frame: 0 };
++                for (event, args) in &events {
++                    raise(&endpoint, &install.extension_id, event, args.clone());
++                }
++            }
++        }
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn tab(id: i64, window: i64, active: bool, title: &str) -> Value {
++        json!({ "id": id, "windowId": window, "active": active, "title": title, "status": "complete", "url": "https://x.test/" })
++    }
++
++    fn names(events: &[(&'static str, Value)]) -> Vec<&'static str> {
++        events.iter().map(|(name, _)| *name).collect()
++    }
++
++    #[test]
++    fn nothing_changed_is_no_event() {
++        let one = || Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
++        assert!(events(&one(), &one()).is_empty());
++    }
++
++    #[test]
++    fn a_new_active_tab_is_created_then_activated() {
++        let before = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
++        let after = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, false, "a"), tab(2, 1, true, "b")], focused: 1 };
++        assert_eq!(names(&events(&before, &after)), ["tabs.onCreated", "tabs.onActivated"]);
++    }
++
++    #[test]
++    fn updates_carry_only_the_changed_fields() {
++        let before = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
++        let after = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "b")], focused: 1 };
++        let events = events(&before, &after);
++        assert_eq!(names(&events), ["tabs.onUpdated"]);
++        assert_eq!(events[0].1[1], json!({ "title": "b" }));
++    }
++
++    #[test]
++    fn closing_a_window_removes_its_tabs_first() {
++        let before = Snapshot { windows: vec![1, 2], tabs: vec![tab(1, 1, true, "a"), tab(2, 2, true, "b")], focused: 2 };
++        let after = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
++        let events = events(&before, &after);
++        assert_eq!(names(&events), ["tabs.onRemoved", "windows.onRemoved", "windows.onFocusChanged"]);
++        assert_eq!(events[0].1[1]["isWindowClosing"], true);
++    }
++}
+diff --git a/crates/zephium-engine/src/host/webext_linux/mod.rs b/crates/zephium-engine/src/host/webext_linux/mod.rs
+index df5733b0..9d0a456e 100644
+--- a/crates/zephium-engine/src/host/webext_linux/mod.rs
++++ b/crates/zephium-engine/src/host/webext_linux/mod.rs
+@@ -9,6 +9,9 @@
+ 
+ mod action;
+ mod api;
++mod dnr;
++mod events;
++mod registered;
+ mod routing;
+ mod scheme;
+ 
+@@ -67,6 +70,9 @@ pub(super) struct ProfileExtensions {
+     packages: scheme::Packages,
+     installs: HashMap<ExtensionInstallId, Install>,
+     routing: routing::Routing,
++    /// The browser window that last had focus: a popup, in a window of its
++    /// own, still belongs to it, as Chrome's "current window".
++    last_focused: Option<zephium_core::ids::WindowId>,
+ }
+ 
+ impl ProfileExtensions {
+@@ -93,6 +99,10 @@ pub(super) struct Install {
+     pub(super) hosts: Vec<String>,
+     pub(super) background: Option<WebView>,
+     pub(super) storage: api::Storage,
++    pub(super) dnr: dnr::Rules,
++    /// The manifest's content scripts, and those registered at run time.
++    manifest_groups: Vec<zephium_webext_linux::content::Group>,
++    pub(super) registered: registered::Registered,
+     pub(super) action: action::ActionState,
+     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
+     pub(super) popup: Option<action::Popup>,
+@@ -112,6 +122,15 @@ impl Install {
+         self.background.iter().cloned().chain(self.popup.as_ref().map(|popup| popup.view.clone())).collect()
+     }
+ 
++    /// The plugin's groups: the manifest's scripts, then the registered ones.
++    pub(super) fn refresh_groups(&mut self) {
++        let groups = self.manifest_groups.iter().cloned().chain(self.registered.groups(&self.root)).collect();
++        self.channel.groups = zephium_webext_linux::content::runnable(groups)
++            .into_iter()
++            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
++            .collect();
++    }
++
+     fn prepare(
+         load: &WebExtensionLoad,
+         generation: ExtensionRuntimeGeneration,
+@@ -120,10 +139,7 @@ impl Install {
+         let manifest = Manifest::load(&load.root).map_err(|error| error.to_string())?;
+         let origin = format!("chrome-extension://{}/", load.extension_id);
+         let info = zephium_webext_linux::info::info(&load.extension_id, &origin, &load.root, &manifest);
+-        let groups = zephium_webext_linux::content::groups(&load.root, &manifest)?
+-            .into_iter()
+-            .map(|group| (group.matches, group.exclude_matches, group.js, group.run_at.to_owned(), group.all_frames))
+-            .collect();
++        let manifest_groups = zephium_webext_linux::content::groups(&load.root, &manifest)?;
+         let loaded = WebExtensionLoaded {
+             name: manifest.name().unwrap_or_else(|| load.extension_id.clone()),
+             version: manifest.version().unwrap_or("0").to_owned(),
+@@ -134,7 +150,7 @@ impl Install {
+             accessible: web_accessible(&manifest),
+             background: background_page(&manifest),
+         };
+-        Ok(Self {
++        let mut install = Self {
+             id: load.install,
+             extension_id: load.extension_id.clone(),
+             generation,
+@@ -144,19 +160,24 @@ impl Install {
+                 id: load.extension_id.clone(),
+                 info,
+                 granted: load.match_patterns.clone(),
+-                groups,
++                groups: Vec::new(),
+             },
+             package,
+             permissions: load.permissions.clone(),
+             hosts: load.match_patterns.clone(),
+             background: None,
++            dnr: dnr::Rules::from_manifest(&manifest, storage.as_deref()),
++            manifest_groups,
++            registered: registered::Registered::open(storage.as_deref()),
+             storage: api::Storage::open(storage)?,
+             action: action::ActionState::from_manifest(&manifest, &load.root),
+             alarms: HashMap::new(),
+             popup: None,
+             active_tabs: HashSet::new(),
+             manifest,
+-        })
++        };
++        install.refresh_groups();
++        Ok(install)
+     }
+ 
+     fn stop(&mut self) {
+@@ -186,6 +207,7 @@ impl super::EngineHost {
+             loaded
+         });
+         self.linux_extensions_sync(profile);
++        self.linux_dnr_rebuild(profile, &load.extension_id);
+         self.sink.emit(EngineEvent::WebExtensionSettled { profile, install: load.install, result });
+         self.sink.emit(EngineEvent::ExtensionActionsInvalidated { profile });
+     }
+@@ -219,6 +241,13 @@ impl super::EngineHost {
+         self.linux_request_tab(profile, Some(url), true);
+     }
+ 
++    /// A Firefox add-on file the person downloaded from addons.mozilla.org
++    /// is saved at `path`: the shell offers it for review.
++    pub(crate) fn addon_downloaded(&mut self, profile: ProfileId, path: PathBuf) {
++        trace!("add-on downloaded to {}", path.display());
++        self.sink.emit(EngineEvent::WebExtensionPackageFetched { profile, path });
++    }
++
+     /// A view of `profile` passed its security configuration: the profile's
+     /// context now serves extension pages and carries the plugin.
+     pub(super) fn linux_extensions_view_ready(&mut self, profile: ProfileId, view: &wry::WebView) {
+@@ -237,6 +266,8 @@ impl super::EngineHost {
+             state.context = Some(context);
+         }
+         self.linux_extensions_sync(profile);
++        // The view is not among the profile's tabs until it is built.
++        self.linux_dnr_add_to(profile, &view.webview());
+     }
+ 
+     /// Bring the plugin's startup data, the served packages, the background
+@@ -269,6 +300,7 @@ impl super::EngineHost {
+         }
+         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
+         self.linux_extensions.set_navigation(profile, ids);
++        self.linux_dnr_sync(profile);
+     }
+ 
+     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {
+@@ -276,6 +308,9 @@ impl super::EngineHost {
+         let mut removed = state.installs.remove(&install)?;
+         removed.stop();
+         state.routing.forget_extension(&removed.extension_id);
++        if let Some(policy) = removed.dnr.applied.take() {
++            self.linux_dnr_remove(profile, &policy);
++        }
+         Some(removed)
+     }
+ 
+diff --git a/crates/zephium-engine/src/host/webext_linux/registered.rs b/crates/zephium-engine/src/host/webext_linux/registered.rs
+new file mode 100644
+index 00000000..6b2550b0
+--- /dev/null
++++ b/crates/zephium-engine/src/host/webext_linux/registered.rs
+@@ -0,0 +1,192 @@
++//! `scripting.registerContentScripts` and its siblings: content scripts an
++//! extension adds at run time. They run beside the manifest's, through the
++//! same plugin data; those registered to persist are kept in the extension's
++//! storage folder and come back at the next start.
++
++use std::path::{Path, PathBuf};
++
++use serde_json::Value;
++use zephium_core::ids::ProfileId;
++use zephium_webext_linux::content::{self, Group};
++
++/// Where persisting registrations are kept, in the storage folder.
++const STATE_FILE: &str = "registered-content-scripts.json";
++/// The API layer, first in every content script list as in the manifest's.
++const API_LAYER: &str = "__zephium__/compat.js";
++
++pub(super) struct Registered {
++    scripts: Vec<Value>,
++    state_file: Option<PathBuf>,
++}
++
++impl Registered {
++    pub(super) fn open(storage: Option<&Path>) -> Self {
++        let state_file = storage.map(|dir| dir.join(STATE_FILE));
++        let scripts = state_file
++            .as_ref()
++            .and_then(|file| std::fs::read(file).ok())
++            .and_then(|bytes| serde_json::from_slice::<Vec<Value>>(&bytes).ok())
++            .unwrap_or_default();
++        Self { scripts, state_file }
++    }
++
++    /// The registrations as plugin groups; one whose files are gone is left out.
++    pub(super) fn groups(&self, package: &Path) -> Vec<Group> {
++        self.scripts.iter().filter_map(|script| group(package, script).ok()).collect()
++    }
++
++    fn save(&self) {
++        let Some(file) = &self.state_file else {
++            return;
++        };
++        let kept: Vec<&Value> = self.scripts.iter().filter(|script| script["persistAcrossSessions"] != false).collect();
++        if let Some(dir) = file.parent() {
++            let _ = std::fs::create_dir_all(dir);
++        }
++        let _ = std::fs::write(file, Value::from(kept.into_iter().cloned().collect::<Vec<_>>()).to_string());
++    }
++
++    /// One API call; `Ok((answer, changed))`.
++    fn call(&mut self, package: &Path, method: &str, args: &[Value]) -> Result<(Value, bool), String> {
++        let first = args.first().cloned().unwrap_or(Value::Null);
++        match method {
++            "registerContentScripts" => {
++                let scripts = first.as_array().cloned().ok_or("registerContentScripts takes a list of scripts.")?;
++                let mut ids: Vec<&str> = self.scripts.iter().filter_map(|script| script["id"].as_str()).collect();
++                for script in &scripts {
++                    let id = script_id(script)?;
++                    if ids.contains(&id) {
++                        return Err(format!("Duplicate script ID '{id}'"));
++                    }
++                    ids.push(id);
++                    group(package, script)?;
++                }
++                self.scripts.extend(scripts);
++                Ok((Value::Null, true))
++            }
++            "updateContentScripts" => {
++                let changes = first.as_array().cloned().ok_or("updateContentScripts takes a list of scripts.")?;
++                let mut scripts = self.scripts.clone();
++                for change in &changes {
++                    let id = script_id(change)?;
++                    let script = scripts.iter_mut().find(|script| script["id"] == id).ok_or(format!("No script with ID '{id}'"))?;
++                    for (key, value) in change.as_object().into_iter().flatten() {
++                        script[key] = value.clone();
++                    }
++                    group(package, script)?;
++                }
++                self.scripts = scripts;
++                Ok((Value::Null, true))
++            }
++            "getRegisteredContentScripts" => {
++                let ids = first["ids"].as_array();
++                let scripts = self.scripts.iter().filter(|script| ids.is_none_or(|ids| ids.contains(&script["id"]))).cloned();
++                Ok((Value::Array(scripts.collect()), false))
++            }
++            "unregisterContentScripts" => {
++                match first["ids"].as_array() {
++                    Some(ids) => {
++                        if let Some(missing) = ids.iter().find(|id| !self.scripts.iter().any(|script| script["id"] == **id)) {
++                            return Err(format!("Nonexistent script ID '{}'", missing.as_str().unwrap_or_default()));
++                        }
++                        self.scripts.retain(|script| !ids.contains(&script["id"]));
++                    }
++                    None => self.scripts.clear(),
++                }
++                Ok((Value::Null, true))
++            }
++            _ => Err(format!("scripting.{method} is not available on Linux yet.")),
++        }
++    }
++}
++
++fn script_id(script: &Value) -> Result<&str, String> {
++    match script["id"].as_str() {
++        Some(id) if !id.is_empty() && !id.starts_with('_') => Ok(id),
++        _ => Err("A content script needs an ID that does not start with '_'.".into()),
++    }
++}
++
++/// A registration as a plugin group, its files read from `package`. Scripts
++/// for the page's own world wait, as the manifest's do.
++fn group(package: &Path, script: &Value) -> Result<Group, String> {
++    if script["world"] == "MAIN" {
++        return Err("Content scripts in the page's own world are not available on Linux yet.".into());
++    }
++    let strings = |key: &str| -> Vec<String> {
++        script[key].as_array().map(|list| list.iter().filter_map(|item| item.as_str().map(|text| text.trim_start_matches('/').to_owned())).collect()).unwrap_or_default()
++    };
++    let (js, css) = (strings("js"), strings("css"));
++    if js.is_empty() && css.is_empty() {
++        return Err(format!("Script with ID '{}' must specify at least one js or css file.", script["id"].as_str().unwrap_or_default()));
++    }
++    let matches = strings("matches");
++    if matches.is_empty() {
++        return Err(format!("Script with ID '{}' must specify 'matches'.", script["id"].as_str().unwrap_or_default()));
++    }
++    let run_at = match script["runAt"].as_str() {
++        Some("document_start") => "document_start",
++        Some("document_end") => "document_end",
++        _ => "document_idle",
++    };
++    let js: Vec<String> = if js.is_empty() { js } else { std::iter::once(API_LAYER.to_owned()).chain(js).collect() };
++    content::group(package, matches, strings("excludeMatches"), &js, &css, run_at, script["allFrames"] == true)
++}
++
++impl super::super::EngineHost {
++    pub(super) fn linux_registered(&mut self, profile: ProfileId, extension_id: &str, method: &str, args: &[Value]) -> Result<Value, String> {
++        let install = self
++            .linux_extensions
++            .profiles
++            .get_mut(&profile)
++            .and_then(|state| state.install_mut(extension_id))
++            .ok_or("The extension is not running.")?;
++        let (answer, changed) = install.registered.call(&install.root, method, args)?;
++        if changed {
++            install.registered.save();
++            install.refresh_groups();
++            self.linux_extensions_sync(profile);
++        }
++        Ok(answer)
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use serde_json::json;
++
++    use super::*;
++
++    fn package() -> tempfile::TempDir {
++        let dir = tempfile::tempdir().unwrap();
++        std::fs::create_dir_all(dir.path().join("__zephium__")).unwrap();
++        std::fs::write(dir.path().join("__zephium__/compat.js"), "api()").unwrap();
++        std::fs::write(dir.path().join("a.js"), "one()").unwrap();
++        dir
++    }
++
++    #[test]
++    fn registrations_run_after_the_api_layer_and_can_be_listed_and_removed() {
++        let dir = package();
++        let mut registered = Registered::open(None);
++        let script = json!({ "id": "a", "matches": ["<all_urls>"], "js": ["a.js"], "runAt": "document_start" });
++        assert!(registered.call(dir.path(), "registerContentScripts", &[json!([script])]).unwrap().1);
++        let groups = registered.groups(dir.path());
++        assert_eq!(groups[0].js, ["api()", "one()"]);
++        assert_eq!(groups[0].run_at, "document_start");
++        assert!(registered.call(dir.path(), "registerContentScripts", &[json!([{ "id": "a", "matches": ["<all_urls>"], "js": ["a.js"] }])]).is_err());
++        let listed = registered.call(dir.path(), "getRegisteredContentScripts", &[json!({ "ids": ["a"] })]).unwrap().0;
++        assert_eq!(listed.as_array().unwrap().len(), 1);
++        registered.call(dir.path(), "unregisterContentScripts", &[json!({})]).unwrap();
++        assert!(registered.groups(dir.path()).is_empty());
++    }
++
++    #[test]
++    fn a_registration_with_a_missing_file_is_refused() {
++        let dir = package();
++        let mut registered = Registered::open(None);
++        let script = json!({ "id": "b", "matches": ["<all_urls>"], "js": ["gone.js"] });
++        assert!(registered.call(dir.path(), "registerContentScripts", &[json!([script])]).is_err());
++        assert!(registered.scripts.is_empty());
++    }
++}
+diff --git a/crates/zephium-engine/src/lib.rs b/crates/zephium-engine/src/lib.rs
+index d5e9e947..666d425b 100644
+--- a/crates/zephium-engine/src/lib.rs
++++ b/crates/zephium-engine/src/lib.rs
+@@ -1132,7 +1132,8 @@ impl RetirementGate {
+             | event @ EngineEvent::WebExtensionAccessRequested(_)
+             | event @ EngineEvent::WebExtensionAccessRemoved(_)
+             | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
+-            event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
++            event @ EngineEvent::WebExtensionDataInterest { profile, .. }
++            | event @ EngineEvent::WebExtensionPackageFetched { profile, .. } => {
+                 self.profile_is_active(profile).then_some(event)
+             }
+             EngineEvent::WebExtensionSettled {
+@@ -3387,9 +3388,9 @@ impl Engine for WebviewEngine {
+     }
+ 
+     fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
+-        #[cfg(any(target_os = "macos", target_os = "windows"))]
++        #[cfg(any(unix, target_os = "windows"))]
+         let _ = self.run_for_active_item(id, move |h| h.show_store_button(id, button));
+-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
++        #[cfg(not(any(unix, target_os = "windows")))]
+         let _ = (id, button);
+     }
+ 
+diff --git a/crates/zephium-engine/src/platform/linux/addon_download.rs b/crates/zephium-engine/src/platform/linux/addon_download.rs
+new file mode 100644
+index 00000000..8f5ea48b
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/addon_download.rs
+@@ -0,0 +1,144 @@
++//! Firefox add-ons from addons.mozilla.org.
++//!
++//! The Linux port saves no downloads, and every view refuses them. A `.xpi`
++//! file the person opens from addons.mozilla.org is the one exception: the
++//! view drops the response, and the file is fetched again here, saved to a
++//! private folder and handed to the browser, which shows the same install
++//! review as for a dropped file. Nothing installs until the person confirms
++//! there.
++
++use std::io::Write;
++use std::path::{Path, PathBuf};
++
++use webkit2gtk::gio::prelude::InputStreamExt;
++use webkit2gtk::glib::object::Cast;
++use webkit2gtk::{
++    PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt, URIRequestExt, WebView,
++    WebViewExt,
++};
++use soup::prelude::SessionExt;
++use zephium_core::ids::ProfileId;
++
++const ADDONS_HOST: &str = "addons.mozilla.org";
++/// Where addons.mozilla.org sends a file link on to.
++const ADDONS_FILES_HOST: &str = "addons.cdn.mozilla.net";
++/// The installer's own ceiling for a package.
++const MAX_BYTES: usize = 256 * 1024 * 1024;
++
++/// Whether `url` is an add-on file on addons.mozilla.org, such as
++/// `https://addons.mozilla.org/firefox/downloads/file/123/name-1.0.xpi`, or
++/// on the file host it redirects to.
++pub(crate) fn is_addon_file(url: &str) -> bool {
++    let Ok(url) = url::Url::parse(url) else {
++        return false;
++    };
++    let path = url.path();
++    let place = match url.host_str() {
++        Some(ADDONS_HOST) => path.contains("/downloads/file/"),
++        Some(ADDONS_FILES_HOST) => path.starts_with("/user-media/addons/"),
++        _ => false,
++    };
++    url.scheme() == "https" && url.port().is_none() && place && path.ends_with(".xpi")
++}
++
++/// On `view` of `profile`, an add-on file the page cannot show is dropped
++/// and fetched for review instead.
++pub(crate) fn offer_for_review(view: &WebView, profile: ProfileId) {
++    view.connect_decide_policy(move |_, decision, kind| {
++        if kind != PolicyDecisionType::Response {
++            return false;
++        }
++        let url = decision
++            .dynamic_cast_ref::<ResponsePolicyDecision>()
++            .and_then(|response| response.request())
++            .and_then(|request| request.uri())
++            .map(|uri| uri.to_string())
++            .unwrap_or_default();
++        if !is_addon_file(&url) {
++            return false;
++        }
++        decision.ignore();
++        trace(format_args!("fetching {url}"));
++        std::thread::spawn(move || match fetch(&url) {
++            Ok(path) => {
++                webkit2gtk::glib::MainContext::default().invoke(move || {
++                    let _ = crate::host::try_with(move |host| host.addon_downloaded(profile, path));
++                });
++            }
++            Err(reason) => trace(format_args!("{url} was not fetched: {reason}")),
++        });
++        true
++    });
++}
++
++/// Fetch `url` into a new private file, refusing more than the installer
++/// would take.
++fn fetch(url: &str) -> Result<PathBuf, String> {
++    let session = soup::Session::new();
++    let message = soup::Message::new("GET", url).map_err(|error| error.to_string())?;
++    let stream = session.send(&message, None::<&webkit2gtk::gio::Cancellable>).map_err(|error| error.to_string())?;
++    if message.status() != soup::Status::Ok {
++        return Err(format!("the server answered {:?}", message.status()));
++    }
++    let path = destination().ok_or("no private folder to save to")?;
++    let mut file = std::fs::File::create(&path).map_err(|error| error.to_string())?;
++    let mut total = 0;
++    loop {
++        let chunk = stream.read_bytes(64 * 1024, None::<&webkit2gtk::gio::Cancellable>).map_err(|error| error.to_string())?;
++        if chunk.is_empty() {
++            break;
++        }
++        total += chunk.len();
++        if total > MAX_BYTES {
++            drop(file);
++            let _ = std::fs::remove_file(&path);
++            return Err("the file is larger than an extension may be".into());
++        }
++        file.write_all(&chunk).map_err(|error| error.to_string())?;
++    }
++    Ok(path)
++}
++
++/// One step of an add-on fetch, when `ZEPHIUM_WEBEXT_TRACE` is set.
++fn trace(step: std::fmt::Arguments<'_>) {
++    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++        eprintln!("webext: add-on {step}");
++    }
++}
++
++/// A new file in the user's private runtime folder, where nobody else can
++/// swap it before the review reads it.
++fn destination() -> Option<PathBuf> {
++    let folder = dirs::runtime_dir().unwrap_or_else(std::env::temp_dir).join("zephium-addons");
++    std::fs::create_dir_all(&folder).ok()?;
++    restrict(&folder);
++    Some(folder.join(unique_name()))
++}
++
++fn restrict(folder: &Path) {
++    use std::os::unix::fs::PermissionsExt;
++    let _ = std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700));
++}
++
++/// A name no other fetch uses: the process and the time.
++fn unique_name() -> String {
++    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |time| time.as_nanos());
++    format!("addon-{}-{nanos}.xpi", std::process::id())
++}
++
++#[cfg(test)]
++mod tests {
++    use super::is_addon_file;
++
++    #[test]
++    fn only_add_on_files_from_addons_mozilla_org_are_taken() {
++        assert!(is_addon_file("https://addons.mozilla.org/firefox/downloads/file/4412/ublock_origin-1.61.xpi"));
++        assert!(is_addon_file("https://addons.mozilla.org/en-US/firefox/downloads/file/1/x.xpi"));
++        assert!(is_addon_file("https://addons.cdn.mozilla.net/user-media/addons/1/x-1.0.xpi"));
++        assert!(!is_addon_file("https://addons.cdn.mozilla.net/static/x.xpi"));
++        assert!(!is_addon_file("http://addons.mozilla.org/firefox/downloads/file/1/x.xpi"));
++        assert!(!is_addon_file("https://addons.mozilla.org.evil.test/firefox/downloads/file/1/x.xpi"));
++        assert!(!is_addon_file("https://addons.mozilla.org/firefox/downloads/file/1/x.exe"));
++        assert!(!is_addon_file("https://example.com/downloads/file/1/x.xpi"));
++    }
++}
+diff --git a/crates/zephium-engine/src/platform/linux/amo_button.rs b/crates/zephium-engine/src/platform/linux/amo_button.rs
+new file mode 100644
+index 00000000..a6b6210c
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/amo_button.rs
+@@ -0,0 +1,28 @@
++//! addons.mozilla.org's "Download Firefox" button as Zephium's own install
++//! button. The page script (amo_page.js) runs in a script world of its own on
++//! the store's top frame; a click opens the add-on file, which
++//! `addon_download` fetches and offers for review.
++
++use webkit2gtk::{
++    UserContentInjectedFrames, UserContentManagerExt, UserScript, UserScriptInjectionTime, WebView, WebViewExt,
++};
++
++const WORLD: &str = "zephium-amo";
++const STORE_PAGES: &str = "https://addons.mozilla.org/*";
++const PAGE_SCRIPT: &str = include_str!("amo_page.js");
++
++/// Give `view`'s visits to the store the install button.
++pub(crate) fn install(view: &WebView) {
++    let Some(manager) = view.user_content_manager() else {
++        return;
++    };
++    let script = UserScript::for_world(
++        PAGE_SCRIPT,
++        UserContentInjectedFrames::TopFrame,
++        UserScriptInjectionTime::End,
++        WORLD,
++        &[STORE_PAGES],
++        &[],
++    );
++    manager.add_script(&script);
++}
+diff --git a/crates/zephium-engine/src/platform/linux/amo_page.js b/crates/zephium-engine/src/platform/linux/amo_page.js
+new file mode 100644
+index 00000000..7f619bff
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/amo_page.js
+@@ -0,0 +1,48 @@
++// On an add-on's page at addons.mozilla.org, the store offers other browsers
++// "Download Firefox and get the extension". Zephium installs Firefox add-ons
++// itself, so that button becomes "Add to Zephium" and opens the file the
++// page's own "Download file" link names; the browser fetches it and shows its
++// install review. Runs in a script world of its own; only trusted clicks
++// count. Requalify when the store changes its markup.
++(() => {
++  if (window !== top || location.protocol !== 'https:' || location.hostname !== 'addons.mozilla.org') return;
++  const LABEL = 'Add to Zephium';
++  const FILE = /^https:\/\/addons\.mozilla\.org\/(?:[^?#]*\/)?downloads\/file\/\d+\/[^/?#]+\.xpi$/;
++  const taken = new WeakSet();
++
++  const fileLink = () =>
++    [...document.querySelectorAll('a[href*="/downloads/file/"]')].find((link) => FILE.test(link.href)) ?? null;
++
++  // The store's main button sits beside the file link.
++  const storeButton = (link) => {
++    for (let box = link.parentElement; box && box !== document.body; box = box.parentElement) {
++      const button = [...box.querySelectorAll('a, button')].find(
++        (element) => element !== link && /Button/.test(element.className),
++      );
++      if (button) return button;
++    }
++    return null;
++  };
++
++  const click = (event) => {
++    const link = fileLink();
++    if (!event.isTrusted || !link) return;
++    event.preventDefault();
++    event.stopImmediatePropagation();
++    location.assign(link.href);
++  };
++
++  const update = () => {
++    const link = fileLink();
++    const button = link && storeButton(link);
++    if (!button) return;
++    if (button.textContent !== LABEL) button.textContent = LABEL;
++    if (!taken.has(button)) {
++      taken.add(button);
++      button.addEventListener('click', click, true);
++    }
++  };
++
++  new MutationObserver(update).observe(document, { childList: true, subtree: true, characterData: true });
++  update();
++})();
+diff --git a/crates/zephium-engine/src/platform/linux/content_filter.rs b/crates/zephium-engine/src/platform/linux/content_filter.rs
+index 082fe514..06d6d799 100644
+--- a/crates/zephium-engine/src/platform/linux/content_filter.rs
++++ b/crates/zephium-engine/src/platform/linux/content_filter.rs
+@@ -117,6 +117,25 @@ impl Drop for ContentPolicyRegistration {
+     }
+ }
+ 
++/// Puts `policy`'s compiled list on `view`. WebKit keys lists by their
++/// identifier, so adding one already there leaves it there once.
++pub(crate) fn add_to_view(view: &webkit2gtk::WebView, policy: &NativeContentPolicy) {
++    let (Some(manager), NativeContentPolicy::Declarative { filter, .. }) = (view.user_content_manager(), policy) else {
++        return;
++    };
++    // SAFETY: both objects are alive for the call; WebKit takes its own reference.
++    unsafe { webkit2gtk::ffi::webkit_user_content_manager_add_filter(manager.to_glib_none().0, filter.0.as_ptr()) };
++}
++
++/// Takes `policy`'s compiled list off `view`, if it is there.
++pub(crate) fn remove_from_view(view: &webkit2gtk::WebView, policy: &NativeContentPolicy) {
++    let (Some(manager), NativeContentPolicy::Declarative { filter, .. }) = (view.user_content_manager(), policy) else {
++        return;
++    };
++    // SAFETY: as above.
++    unsafe { webkit2gtk::ffi::webkit_user_content_manager_remove_filter(manager.to_glib_none().0, filter.0.as_ptr()) };
++}
++
+ pub(crate) fn install_scoped_on_view(
+     view: &wry::WebView,
+     policy: &NativeContentPolicy,
+diff --git a/crates/zephium-engine/src/platform/linux/mod.rs b/crates/zephium-engine/src/platform/linux/mod.rs
+index 357a63fb..58a196fb 100644
+--- a/crates/zephium-engine/src/platform/linux/mod.rs
++++ b/crates/zephium-engine/src/platform/linux/mod.rs
+@@ -1,10 +1,13 @@
+ //! Linux adapter. Content views are built into a gtk::Fixed owned by the
+ //! composition root; the stage positions them and draws the drop indicator.
+ 
++mod addon_download;
++mod amo_button;
+ mod content_filter;
+ pub(crate) mod extension_channel;
+ mod find;
+ mod stage;
++pub(crate) mod store_button;
+ 
+ pub(crate) fn external_app_name(_url: &str) -> Option<String> {
+     None
+@@ -15,6 +18,7 @@ pub(crate) fn open_external_app(_url: &str) -> bool {
+ }
+ 
+ pub(crate) use content_filter::{
++    add_to_view as add_content_policy_to_view, remove_from_view as remove_content_policy_from_view,
+     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
+     install_scoped_on_view as install_scoped_content_policy_on_view,
+     remove_content_policy_cache_identifier, same_policy as same_content_policy,
+@@ -435,6 +439,11 @@ pub fn configure(
+         // SAFETY: see the typed private-key invariant above.
+         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+     }
++    // Private profiles run no extensions, so they take no add-on either.
++    if !expected_ephemeral {
++        addon_download::offer_for_review(&view, partition.profile());
++        amo_button::install(&view);
++    }
+ 
+     // Extensions never run in private profiles, so their contexts get no
+     // plugin. A persistent context attaches it here, before its first web
+diff --git a/crates/zephium-engine/src/platform/linux/store_button.rs b/crates/zephium-engine/src/platform/linux/store_button.rs
+new file mode 100644
+index 00000000..43843dcc
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/store_button.rs
+@@ -0,0 +1,154 @@
++//! The Chrome Web Store's in-page "Add to Zephium" button on WebKitGTK.
++//!
++//! As on macOS, its script runs in a script world of its own: the page can
++//! neither reach the button nor post to the handler, which exists only in
++//! that world. WebKitGTK does not name the frame of a message, so the script
++//! is injected into the store's top frame only, and a click counts only when
++//! the view's own address is the listing it names.
++
++use std::ffi::c_void;
++
++use gtk::glib::translate::FromGlibPtrFull;
++use gtk::glib::prelude::ObjectExt;
++use gtk::glib::ObjectType;
++use webkit2gtk::{
++    JavascriptResult, UserContentInjectedFrames, UserContentManager, UserContentManagerExt, UserScript,
++    UserScriptInjectionTime, WebView, WebViewExt,
++};
++use zephium_webext::{store, ExtensionId};
++
++const WORLD: &str = "zephium-store";
++const HANDLER: &str = "zephiumStore";
++const STORE_PAGES: &str = "https://chromewebstore.google.com/*";
++const MAX_BODY_UTF16: usize = 64;
++
++/// One step of the button, when `ZEPHIUM_WEBEXT_TRACE` is set.
++fn trace(step: std::fmt::Arguments<'_>) {
++    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
++        eprintln!("store button: {step}");
++    }
++}
++/// A body this long in bytes is refused before it is measured in UTF-16.
++const MAX_BODY_BYTES: usize = 4 * MAX_BODY_UTF16;
++
++// As in the platform module: javascriptcore-rs is Wry's private dependency,
++// so the two string reads go through JSC's stable C ABI.
++unsafe extern "C" {
++    fn jsc_value_is_string(value: *mut c_void) -> i32;
++    fn jsc_value_to_string_as_bytes(value: *mut c_void) -> *mut gtk::glib::ffi::GBytes;
++}
++
++#[derive(Debug, PartialEq, Eq)]
++pub(crate) enum StoreMessage {
++    /// A new document asks for the button's state.
++    Ready,
++    /// A click on the button, for the listing the view shows.
++    Clicked(ExtensionId),
++}
++
++/// The world and handler of one view; dropping it removes the handler and
++/// the script.
++pub(crate) struct StoreButton {
++    manager: UserContentManager,
++    view: gtk::glib::WeakRef<WebView>,
++    script: UserScript,
++    signal: Option<gtk::glib::SignalHandlerId>,
++}
++
++impl StoreButton {
++    /// Runs the store's page script in `view`'s store world and routes what
++    /// its button reports to `on_message`.
++    pub(crate) fn install(view: &WebView, on_message: impl Fn(StoreMessage) + 'static) -> Option<Self> {
++        let manager = view.user_content_manager()?;
++        let weak = gtk::glib::WeakRef::new();
++        weak.set(Some(view));
++        let page = weak.clone();
++        let signal = manager.connect_script_message_received(Some(HANDLER), move |_, result| {
++            let Some(view) = page.upgrade() else {
++                return;
++            };
++            let message = body(result).and_then(|body| admit(&view, &body));
++            trace(format_args!("message {message:?}"));
++            if let Some(message) = message {
++                on_message(message);
++            }
++        });
++        if !manager.register_script_message_handler_in_world(HANDLER, WORLD) {
++            trace(format_args!("the handler could not be registered"));
++            manager.disconnect(signal);
++            return None;
++        }
++        let script = UserScript::for_world(
++            store::PAGE_SCRIPT,
++            UserContentInjectedFrames::TopFrame,
++            UserScriptInjectionTime::Start,
++            WORLD,
++            &[STORE_PAGES],
++            &[],
++        );
++        manager.add_script(&script);
++        Some(Self { manager, view: weak, script, signal: Some(signal) })
++    }
++
++    /// Shows `state`, a JSON object the script's `show` accepts, in the
++    /// view's current document.
++    pub(crate) fn show(&self, state: &str) {
++        let Some(view) = self.view.upgrade() else {
++            return;
++        };
++        let script = format!("window.__zephium_store_v1__?.show({state})");
++        trace(format_args!("show {state}"));
++        view.evaluate_javascript(&script, Some(WORLD), None, None::<&gtk::gio::Cancellable>, |result| {
++            if let Err(error) = result {
++                trace(format_args!("show failed: {error}"));
++            }
++        });
++    }
++}
++
++/// The message's text, if it is a short string.
++fn body(result: &JavascriptResult) -> Option<String> {
++    let value = result.js_value()?;
++    let value = value.as_ptr().cast::<c_void>();
++    // SAFETY: a live JSCValue held by `result` for this call.
++    if unsafe { jsc_value_is_string(value) } == 0 {
++        return None;
++    }
++    // SAFETY: as above; the call transfers one owned GBytes reference, which
++    // `from_glib_full` takes.
++    let raw = unsafe { jsc_value_to_string_as_bytes(value) };
++    if raw.is_null() {
++        return None;
++    }
++    let bytes = unsafe { gtk::glib::Bytes::from_glib_full(raw) };
++    if bytes.len() > MAX_BODY_BYTES {
++        return None;
++    }
++    std::str::from_utf8(&bytes).ok().map(str::to_owned)
++}
++
++/// What a message from the store world means, when it is one the button
++/// sends from the store page the view shows.
++fn admit(view: &WebView, body: &str) -> Option<StoreMessage> {
++    if body.encode_utf16().count() > MAX_BODY_UTF16 {
++        return None;
++    }
++    let address = view.uri()?.to_string();
++    if !address.starts_with("https://chromewebstore.google.com/") {
++        return None;
++    }
++    if body == "ready" {
++        return Some(StoreMessage::Ready);
++    }
++    store::listing_id(&address).filter(|id| id.as_str() == body).map(StoreMessage::Clicked)
++}
++
++impl Drop for StoreButton {
++    fn drop(&mut self) {
++        self.manager.remove_script(&self.script);
++        self.manager.unregister_script_message_handler_in_world(HANDLER, WORLD);
++        if let Some(signal) = self.signal.take() {
++            self.manager.disconnect(signal);
++        }
++    }
++}
+diff --git a/crates/zephium-ipc/src/lib.rs b/crates/zephium-ipc/src/lib.rs
+index ae8da5e0..84a1b928 100644
+--- a/crates/zephium-ipc/src/lib.rs
++++ b/crates/zephium-ipc/src/lib.rs
+@@ -1735,6 +1735,8 @@ pub enum Projection {
+     WebExtensionAccessRequest(WebExtensionAccessRequestView),
+     WebExtensionAccessRemoved(WebExtensionAccessRemovalView),
+     WebExtensionStoreClick(WebExtensionStoreClickView),
++    /// A downloaded extension package to review, as if it had been dropped.
++    WebExtensionPackageFetched(String),
+     UiCommand(String),
+     FindResult(FindResultView),
+     Search(SearchResults),
+diff --git a/crates/zephium-webext-linux/js/runtime.js b/crates/zephium-webext-linux/js/runtime.js
+index 0a6e2487..799453d1 100644
+--- a/crates/zephium-webext-linux/js/runtime.js
++++ b/crates/zephium-webext-linux/js/runtime.js
+@@ -70,6 +70,16 @@
+     };
+   }
+ 
++  // An answer known in this context, delivered as a method's would be.
++  function answer(value) {
++    return (...args) => {
++      const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
++      if (!callback) return Promise.resolve(value);
++      queueMicrotask(() => callback(value));
++      return undefined;
++    };
++  }
++
+   // ---- Events ---------------------------------------------------------------
+ 
+   class ExtensionEvent {
+@@ -270,6 +280,7 @@
+       return entry.replace(/\$(\d)/g, (_, index) => values[Number(index) - 1] ?? "");
+     },
+     getUILanguage: () => info.uiLanguage,
++    detectLanguage: answer({ isReliable: false, languages: [] }),
+     getAcceptLanguages: method("i18n.getAcceptLanguages"),
+   };
+ 
+@@ -277,6 +288,12 @@
+     getURL: runtime.getURL,
+     inIncognitoContext: false,
+     isAllowedIncognitoAccess: method("extension.isAllowedIncognitoAccess"),
++    // The port gives extensions no access to file:// pages.
++    isAllowedFileSchemeAccess: answer(false),
++    // Each context runs in a process of its own: no other context's window
++    // can be handed over.
++    getViews: () => [],
++    getBackgroundPage: () => null,
+   };
+ 
+   const storage = {
+@@ -328,6 +345,21 @@
+           return method("scripting.executeScript")({ ...rest, code }, callback);
+         },
+         insertCSS: undefined, removeCSS: undefined,
++        registerContentScripts: undefined, getRegisteredContentScripts: undefined,
++        unregisterContentScripts: undefined, updateContentScripts: undefined,
++      }),
++      declarativeNetRequest: Object.assign(namespace("declarativeNetRequest", {
++        getEnabledRulesets: undefined, updateEnabledRulesets: undefined,
++        getDynamicRules: undefined, updateDynamicRules: undefined,
++        getSessionRules: undefined, updateSessionRules: undefined,
++        isRegexSupported: undefined, getAvailableStaticRuleCount: undefined,
++        getDisabledRuleIds: undefined, updateStaticRules: undefined,
++        getMatchedRules: undefined, setExtensionActionOptions: undefined,
++      }, ["onRuleMatchedDebug"]), {
++        MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50, MAX_NUMBER_OF_STATIC_RULESETS: 100,
++        MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_SESSION_RULES: 5000,
++        MAX_NUMBER_OF_REGEX_RULES: 1000, GUARANTEED_MINIMUM_STATIC_RULES: 30000,
++        DYNAMIC_RULESET_ID: "_dynamic", SESSION_RULESET_ID: "_session",
+       }),
+       alarms: namespace("alarms", {
+         create: undefined, get: undefined, getAll: undefined, clear: undefined, clearAll: undefined,
+@@ -354,6 +386,20 @@
+         ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred",
+           "onHistoryStateUpdated", "onReferenceFragmentUpdated"]),
+     });
++    // Present so a background that listens at start keeps running; WebKitGTK
++    // gives the port no hook into requests, so these events never fire.
++    Object.assign(chrome, {
++      webRequest: namespace("webRequest", { handlerBehaviorChanged: answer(undefined) },
++        ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
++          "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]),
++      idle: namespace("idle", { queryState: answer("active"), setDetectionInterval: answer(undefined) }, ["onStateChanged"]),
++      management: namespace("management", {
++        getSelf: answer({
++          id: info.id, name: info.manifest.name, version: info.manifest.version, enabled: true,
++          installType: "normal", type: "extension", mayDisable: true,
++        }),
++      }, ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]),
++    });
+     // Firefox's name for contextMenus.
+     chrome.menus = chrome.contextMenus;
+     Object.assign(runtime, {
+diff --git a/crates/zephium-webext-linux/src/content.rs b/crates/zephium-webext-linux/src/content.rs
+index aaae9ae5..13a31ab4 100644
+--- a/crates/zephium-webext-linux/src/content.rs
++++ b/crates/zephium-webext-linux/src/content.rs
+@@ -31,22 +31,59 @@ pub fn groups(package: &Path, manifest: &Manifest) -> Result<Vec<Group>, String>
+         .into_iter()
+         .filter(|script| script.world == World::Isolated)
+         .map(|script| {
+-            Ok(Group {
+-                js: read_all(package, &script.js)?,
+-                css: read_all(package, &script.css)?,
+-                matches: script.matches,
+-                exclude_matches: script.exclude_matches,
+-                run_at: match script.run_at {
+-                    RunAt::DocumentStart => "document_start",
+-                    RunAt::DocumentEnd => "document_end",
+-                    RunAt::DocumentIdle => "document_idle",
+-                },
+-                all_frames: script.all_frames,
+-            })
++            let run_at = match script.run_at {
++                RunAt::DocumentStart => "document_start",
++                RunAt::DocumentEnd => "document_end",
++                RunAt::DocumentIdle => "document_idle",
++            };
++            group(package, script.matches, script.exclude_matches, &script.js, &script.css, run_at, script.all_frames)
+         })
+         .collect()
+ }
+ 
++/// One group with its files' text: a manifest entry, or a script the
++/// extension registered at run time.
++pub fn group(
++    package: &Path,
++    matches: Vec<String>,
++    exclude_matches: Vec<String>,
++    js: &[String],
++    css: &[String],
++    run_at: &'static str,
++    all_frames: bool,
++) -> Result<Group, String> {
++    Ok(Group { js: read_all(package, js)?, css: read_all(package, css)?, matches, exclude_matches, run_at, all_frames })
++}
++
++/// The groups as the web-process plugin runs them: scripts only. A group's
++/// CSS goes into the page at `document_start` whatever the group's timing,
++/// as Chrome inserts it before the page is built, so it becomes a group of
++/// its own that adds the styles.
++pub fn runnable(groups: Vec<Group>) -> Vec<Group> {
++    groups
++        .into_iter()
++        .flat_map(|group| {
++            let styles = (!group.css.is_empty()).then(|| Group {
++                js: vec![style_inserter(&group.css)],
++                css: Vec::new(),
++                run_at: "document_start",
++                ..group.clone()
++            });
++            let scripts = (!group.js.is_empty()).then(|| Group { css: Vec::new(), ..group });
++            styles.into_iter().chain(scripts)
++        })
++        .collect()
++}
++
++/// A script that adds `css` to the document as soon as it has a root
++/// element; at `document_start` it has none yet.
++fn style_inserter(css: &[String]) -> String {
++    let text = serde_json::Value::String(css.join("\n"));
++    format!(
++        r#"(() => {{ const style = document.createElement("style"); style.textContent = {text}; const place = () => (document.head || document.documentElement).append(style); if (document.documentElement) place(); else new MutationObserver((_, observer) => {{ if (document.documentElement) {{ observer.disconnect(); place(); }} }}).observe(document, {{ childList: true }}); }})()"#
++    )
++}
++
+ fn read_all(package: &Path, paths: &[String]) -> Result<Vec<String>, String> {
+     paths.iter().map(|path| read(package, path)).collect()
+ }
+@@ -94,6 +131,24 @@ mod tests {
+         assert!(groups[0].all_frames);
+     }
+ 
++    #[test]
++    fn css_runs_at_document_start_in_a_group_of_its_own() {
++        let group = Group {
++            matches: vec!["<all_urls>".into()],
++            exclude_matches: Vec::new(),
++            js: vec!["one()".into()],
++            css: vec!["p { color: red }".into()],
++            run_at: "document_idle",
++            all_frames: false,
++        };
++        let groups = runnable(vec![group.clone(), Group { js: Vec::new(), ..group }]);
++        assert_eq!(groups.len(), 3, "styles and scripts, then styles alone");
++        assert_eq!(groups[0].run_at, "document_start");
++        assert!(groups[0].js[0].contains("p { color: red }"));
++        assert_eq!((groups[1].run_at, groups[1].js.as_slice()), ("document_idle", ["one()".to_owned()].as_slice()));
++        assert!(groups.iter().all(|group| group.css.is_empty()));
++    }
++
+     #[test]
+     fn a_missing_file_is_an_error() {
+         let dir = package(
+diff --git a/crates/zephium-webext-linux/src/dnr.rs b/crates/zephium-webext-linux/src/dnr.rs
+new file mode 100644
+index 00000000..ddebe819
+--- /dev/null
++++ b/crates/zephium-webext-linux/src/dnr.rs
+@@ -0,0 +1,341 @@
++//! `declarativeNetRequest` rules as WebKit content-blocker rules.
++//!
++//! WebKitGTK blocks requests with compiled content-blocker lists, the format
++//! Safari uses, so an extension's rules are translated into one such list.
++//! The two formats overlap well for blocking, allowing and upgrading; a rule
++//! WebKit cannot express (redirects, header changes, request-domain
++//! exclusions, regular expressions beyond its subset) is left out and
++//! counted, never approximated into one that blocks more than it should.
++//!
++//! WebKit applies a list top to bottom, a later `ignore-previous-rules`
++//! undoing earlier matches. Sorting by priority, with blocks before allows of
++//! the same priority, gives Chrome's outcome: the highest priority wins, and
++//! on a tie an allow beats a block.
++
++use serde_json::{json, Map, Value};
++
++/// The content types WebKit names for subresources. A rule that names no
++/// type applies to all of them; the page itself is a `document` and only
++/// a rule that names `main_frame` or `sub_frame` touches it, as in Chrome.
++const SUBRESOURCE_TYPES: [&str; 7] = ["image", "style-sheet", "script", "font", "raw", "svg-document", "media"];
++
++/// The list for `rules`, and how many rules it had to leave out.
++pub fn translate(rules: &[Value]) -> (String, usize) {
++    let mut kept: Vec<(i64, u8, Value)> = Vec::new();
++    let mut skipped = 0;
++    for rule in rules {
++        match translate_rule(rule) {
++            Some(translated) => {
++                let priority = rule["priority"].as_i64().unwrap_or(1);
++                let rank = if translated.iter().any(|rule| rule["action"]["type"] == "ignore-previous-rules") { 1 } else { 0 };
++                kept.extend(translated.into_iter().map(|rule| (priority, rank, rule)));
++            }
++            None => skipped += 1,
++        }
++    }
++    kept.sort_by_key(|(priority, rank, _)| (*priority, *rank));
++    let list: Vec<Value> = kept.into_iter().map(|(_, _, rule)| rule).collect();
++    (Value::Array(list).to_string(), skipped)
++}
++
++/// `isRegexSupported`: whether WebKit can compile `regex`.
++pub fn regex_supported(regex: &str) -> bool {
++    regex_filter(regex).is_some()
++}
++
++/// One DNR rule as one or more WebKit rules (one per request domain).
++fn translate_rule(rule: &Value) -> Option<Vec<Value>> {
++    let condition = &rule["condition"];
++    let action = match rule["action"]["type"].as_str()? {
++        "block" => "block",
++        "allow" | "allowAllRequests" => "ignore-previous-rules",
++        "upgradeScheme" => "make-https",
++        _ => return None,
++    };
++    // Conditions WebKit has no counterpart for.
++    if ["excludedRequestDomains", "requestMethods", "excludedRequestMethods", "tabIds", "excludedTabIds", "responseHeaders"]
++        .iter()
++        .any(|key| !condition[*key].is_null())
++    {
++        return None;
++    }
++    if rule["action"]["type"] == "allowAllRequests" {
++        return allow_all_requests(condition);
++    }
++
++    let mut trigger = Map::new();
++    if let Some(types) = resource_types(condition) {
++        if types.is_empty() {
++            return None;
++        }
++        trigger.insert("resource-type".into(), json!(types));
++    }
++    match condition["domainType"].as_str() {
++        Some("firstParty") => drop(trigger.insert("load-type".into(), json!(["first-party"]))),
++        Some("thirdParty") => drop(trigger.insert("load-type".into(), json!(["third-party"]))),
++        Some(_) => return None,
++        None => {}
++    }
++    let initiators = domains(condition, "initiatorDomains", "domains")?;
++    let excluded = domains(condition, "excludedInitiatorDomains", "excludedDomains")?;
++    if !initiators.is_empty() {
++        trigger.insert("if-domain".into(), json!(initiators));
++    } else if !excluded.is_empty() {
++        trigger.insert("unless-domain".into(), json!(excluded));
++    }
++    if condition["isUrlFilterCaseSensitive"] == true {
++        trigger.insert("url-filter-is-case-sensitive".into(), json!(true));
++    }
++
++    let filters = url_filters(condition)?;
++    Some(
++        filters
++            .into_iter()
++            .map(|filter| {
++                let mut trigger = trigger.clone();
++                trigger.insert("url-filter".into(), json!(filter));
++                json!({ "trigger": trigger, "action": { "type": action } })
++            })
++            .collect(),
++    )
++}
++
++/// `allowAllRequests` lifts every rule for pages of the given domains, the
++/// one shape of it WebKit can express.
++fn allow_all_requests(condition: &Value) -> Option<Vec<Value>> {
++    let only_domains = condition.as_object().is_some_and(|keys| {
++        keys.keys().all(|key| ["requestDomains", "resourceTypes"].contains(&key.as_str()))
++    });
++    let request_domains = domains(condition, "requestDomains", "")?;
++    if !only_domains || request_domains.is_empty() {
++        return None;
++    }
++    Some(vec![json!({
++        "trigger": { "url-filter": ".*", "if-domain": request_domains },
++        "action": { "type": "ignore-previous-rules" },
++    })])
++}
++
++/// The rule's types in WebKit's names: `None` for every subresource.
++fn resource_types(condition: &Value) -> Option<Vec<&'static str>> {
++    let names = |key: &str| -> Option<Vec<String>> {
++        condition[key].as_array().map(|list| list.iter().filter_map(|name| name.as_str().map(str::to_owned)).collect())
++    };
++    let mut types: Vec<&'static str> = match names("resourceTypes") {
++        Some(list) => list.iter().filter_map(|name| webkit_type(name)).collect(),
++        None => {
++            let excluded: Vec<&'static str> = names("excludedResourceTypes").unwrap_or_default().iter().filter_map(|name| webkit_type(name)).collect();
++            if excluded.is_empty() {
++                return None;
++            }
++            // Excluding a type WebKit merges with others (all of `raw`)
++            // excludes them all, so nothing is blocked that should not be.
++            SUBRESOURCE_TYPES.iter().copied().filter(|kind| !excluded.contains(kind)).collect()
++        }
++    };
++    types.sort_unstable();
++    types.dedup();
++    Some(types)
++}
++
++fn webkit_type(name: &str) -> Option<&'static str> {
++    Some(match name {
++        "main_frame" | "sub_frame" => "document",
++        "stylesheet" => "style-sheet",
++        "script" => "script",
++        "image" => "image",
++        "font" => "font",
++        "media" => "media",
++        "object" | "xmlhttprequest" | "ping" | "csp_report" | "websocket" | "webtransport" | "webbundle" | "other" => "raw",
++        _ => return None,
++    })
++}
++
++/// A domain list in WebKit's form, `*` taking in the subdomains as DNR
++/// does. `None` when a domain is not plain ASCII.
++fn domains(condition: &Value, key: &str, legacy: &str) -> Option<Vec<String>> {
++    let list = condition[key].as_array().or_else(|| condition.get(legacy).and_then(Value::as_array));
++    let Some(list) = list else {
++        return Some(Vec::new());
++    };
++    list.iter()
++        .map(|domain| {
++            let domain = domain.as_str()?.to_ascii_lowercase();
++            let plain = !domain.is_empty() && domain.bytes().all(|byte| byte.is_ascii_alphanumeric() || b"-._".contains(&byte));
++            plain.then(|| format!("*{domain}"))
++        })
++        .collect()
++}
++
++/// The URL patterns for the rule: one per request domain, or one.
++fn url_filters(condition: &Value) -> Option<Vec<String>> {
++    let pattern = match (condition["urlFilter"].as_str(), condition["regexFilter"].as_str()) {
++        (Some(_), Some(_)) => return None,
++        (Some(filter), None) => Some(url_filter(filter)?),
++        (None, Some(regex)) => Some(regex_filter(regex)?),
++        (None, None) => None,
++    };
++    let request_domains = domains(condition, "requestDomains", "")?;
++    if request_domains.is_empty() {
++        return Some(vec![pattern.unwrap_or_else(|| ".*".to_owned())]);
++    }
++    // A request domain anchors the pattern to the host, which only works
++    // for a pattern that is not anchored itself.
++    let rest = match &pattern {
++        Some(pattern) if pattern.starts_with('^') => return None,
++        Some(pattern) => format!(".*{pattern}"),
++        None => String::new(),
++    };
++    Some(
++        request_domains
++            .iter()
++            .map(|domain| format!("^[^:]+://([^/]*\\.)?{}[/:]{rest}", escape(domain.trim_start_matches('*'))))
++            .collect(),
++    )
++}
++
++/// DNR's `urlFilter` syntax as a WebKit regular expression.
++fn url_filter(filter: &str) -> Option<String> {
++    if !filter.is_ascii() || filter.is_empty() {
++        return None;
++    }
++    let (start, body) = if let Some(rest) = filter.strip_prefix("||") {
++        ("^[^:]+://([^/]*\\.)?", rest)
++    } else if let Some(rest) = filter.strip_prefix('|') {
++        ("^", rest)
++    } else {
++        ("", filter)
++    };
++    let (body, end) = match body.strip_suffix('|') {
++        Some(rest) => (rest, "$"),
++        None => (body, ""),
++    };
++    let mut pattern = String::from(start);
++    for character in body.chars() {
++        match character {
++            '*' => pattern.push_str(".*"),
++            // A separator: anything but a letter, a digit or `_-.%`. The end
++            // of the URL is a separator too, which WebKit cannot say; the
++            // host always ends in `/`, `:` or `?`, so host patterns lose
++            // nothing.
++            '^' => pattern.push_str("[^a-zA-Z0-9_.%-]"),
++            other => pattern.push_str(&escape(&other.to_string())),
++        }
++    }
++    pattern.push_str(end);
++    Some(pattern)
++}
++
++/// A `regexFilter` WebKit can compile: its subset has no alternation, no
++/// counted repetition, no shorthand classes and no lookaround.
++fn regex_filter(regex: &str) -> Option<String> {
++    let mut in_class = false;
++    let mut escaped = false;
++    for character in regex.chars() {
++        if !character.is_ascii() {
++            return None;
++        }
++        if escaped {
++            if character.is_ascii_alphanumeric() {
++                return None;
++            }
++            escaped = false;
++            continue;
++        }
++        match character {
++            '\\' => escaped = true,
++            '[' => in_class = true,
++            ']' => in_class = false,
++            '|' | '{' | '}' if !in_class => return None,
++            _ => {}
++        }
++    }
++    (!regex.contains("(?")).then(|| regex.to_owned())
++}
++
++fn escape(text: &str) -> String {
++    let mut escaped = String::with_capacity(text.len());
++    for character in text.chars() {
++        if ".+?()[]{}\\$|^*".contains(character) {
++            escaped.push('\\');
++        }
++        escaped.push(character);
++    }
++    escaped
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn list(rules: Value) -> (Vec<Value>, usize) {
++        let (text, skipped) = translate(rules.as_array().unwrap());
++        (serde_json::from_str(&text).unwrap(), skipped)
++    }
++
++    #[test]
++    fn a_domain_anchored_block_becomes_a_host_pattern() {
++        let (rules, skipped) = list(json!([{ "id": 1, "action": { "type": "block" }, "condition": { "urlFilter": "||ads.example.com^" } }]));
++        assert_eq!(skipped, 0);
++        assert_eq!(rules[0]["trigger"]["url-filter"], "^[^:]+://([^/]*\\.)?ads\\.example\\.com[^a-zA-Z0-9_.%-]");
++        assert_eq!(rules[0]["action"]["type"], "block");
++        assert!(rules[0]["trigger"]["resource-type"].is_null(), "every subresource, not the page");
++    }
++
++    #[test]
++    fn allows_follow_blocks_of_the_same_priority_and_precede_higher_blocks() {
++        let (rules, _) = list(json!([
++            { "id": 1, "priority": 2, "action": { "type": "block" }, "condition": { "urlFilter": "a" } },
++            { "id": 2, "action": { "type": "allow" }, "condition": { "urlFilter": "b" } },
++            { "id": 3, "action": { "type": "block" }, "condition": { "urlFilter": "c" } },
++        ]));
++        let order: Vec<&str> = rules.iter().map(|rule| rule["trigger"]["url-filter"].as_str().unwrap()).collect();
++        assert_eq!(order, ["c", "b", "a"]);
++    }
++
++    #[test]
++    fn types_domains_and_party_carry_over() {
++        let (rules, _) = list(json!([{ "id": 1, "action": { "type": "block" }, "condition": {
++            "urlFilter": "/track", "resourceTypes": ["script", "xmlhttprequest", "ping"],
++            "initiatorDomains": ["news.example"], "domainType": "thirdParty" } }]));
++        let trigger = &rules[0]["trigger"];
++        assert_eq!(trigger["resource-type"], json!(["raw", "script"]));
++        assert_eq!(trigger["if-domain"], json!(["*news.example"]));
++        assert_eq!(trigger["load-type"], json!(["third-party"]));
++        assert_eq!(trigger["url-filter"], "/track");
++    }
++
++    #[test]
++    fn request_domains_become_one_host_rule_each() {
++        let (rules, _) = list(json!([{ "id": 1, "action": { "type": "block" }, "condition": { "requestDomains": ["a.test", "b.test"] } }]));
++        assert_eq!(rules.len(), 2);
++        assert_eq!(rules[1]["trigger"]["url-filter"], "^[^:]+://([^/]*\\.)?b\\.test[/:]");
++    }
++
++    #[test]
++    fn what_webkit_cannot_express_is_left_out() {
++        let (rules, skipped) = list(json!([
++            { "id": 1, "action": { "type": "redirect", "redirect": { "url": "https://x.test" } }, "condition": { "urlFilter": "a" } },
++            { "id": 2, "action": { "type": "block" }, "condition": { "regexFilter": "^https://(a|b)\\.test/" } },
++            { "id": 3, "action": { "type": "block" }, "condition": { "regexFilter": "\\d+" } },
++            { "id": 4, "action": { "type": "block" }, "condition": { "urlFilter": "a", "excludedRequestDomains": ["x.test"] } },
++            { "id": 5, "action": { "type": "block" }, "condition": { "regexFilter": "^https://[a-z]+\\.test/ads" } },
++        ]));
++        assert_eq!(skipped, 4);
++        assert_eq!(rules[0]["trigger"]["url-filter"], "^https://[a-z]+\\.test/ads");
++    }
++
++    #[test]
++    fn allow_all_requests_lifts_rules_for_listed_sites() {
++        let (rules, skipped) = list(json!([{ "id": 1, "action": { "type": "allowAllRequests" }, "condition": {
++            "requestDomains": ["shop.test"], "resourceTypes": ["main_frame"] } }]));
++        assert_eq!(skipped, 0);
++        assert_eq!(rules[0]["trigger"], json!({ "url-filter": ".*", "if-domain": ["*shop.test"] }));
++    }
++
++    #[test]
++    fn plain_patterns_escape_regex_characters() {
++        assert_eq!(url_filter("|https://x.test/a?b=1|").unwrap(), "^https://x\\.test/a\\?b=1$");
++        assert_eq!(url_filter("/ads/*.gif").unwrap(), "/ads/.*\\.gif");
++    }
++}
+diff --git a/crates/zephium-webext-linux/src/lib.rs b/crates/zephium-webext-linux/src/lib.rs
+index b507f809..486ab092 100644
+--- a/crates/zephium-webext-linux/src/lib.rs
++++ b/crates/zephium-webext-linux/src/lib.rs
+@@ -7,6 +7,7 @@
+ //! design and the protocol are in the Linux port's docs/extensions.md.
+ 
+ pub mod content;
++pub mod dnr;
+ pub mod info;
+ pub mod storage;
+ 
+diff --git a/crates/zephium-webext-process/src/matching.rs b/crates/zephium-webext-process/src/matching.rs
+index 952c73dd..5c0b8171 100644
+--- a/crates/zephium-webext-process/src/matching.rs
++++ b/crates/zephium-webext-process/src/matching.rs
+@@ -9,6 +9,21 @@ pub fn any_matches(patterns: &[String], url: &str) -> bool {
+     patterns.iter().any(|pattern| matches(pattern, &target))
+ }
+ 
++/// Pages no extension may script, whatever it was granted: the add-on
++/// stores, as Chrome keeps extensions off its Web Store and Firefox off
++/// addons.mozilla.org. An extension there could install others.
++pub fn is_restricted(url: &str) -> bool {
++    let Some(target) = Target::parse(url) else {
++        return false;
++    };
++    target.scheme == "https"
++        && match target.host.to_ascii_lowercase().as_str() {
++            "chromewebstore.google.com" | "addons.mozilla.org" => true,
++            "chrome.google.com" => target.path.starts_with("/webstore"),
++            _ => false,
++        }
++}
++
+ struct Target<'a> {
+     scheme: &'a str,
+     host: &'a str,
+@@ -91,7 +106,16 @@ fn glob(pattern: &str, text: &str) -> bool {
+ 
+ #[cfg(test)]
+ mod tests {
+-    use super::any_matches;
++    use super::{any_matches, is_restricted};
++
++    #[test]
++    fn the_add_on_stores_are_off_limits() {
++        assert!(is_restricted("https://chromewebstore.google.com/detail/x/abc"));
++        assert!(is_restricted("https://chrome.google.com/webstore/detail/abc"));
++        assert!(is_restricted("https://addons.mozilla.org/en-US/firefox/addon/x/"));
++        assert!(!is_restricted("https://chrome.google.com/search"));
++        assert!(!is_restricted("https://example.com/"));
++    }
+ 
+     fn yes(pattern: &str, url: &str) -> bool {
+         any_matches(&[pattern.to_owned()], url)
+diff --git a/crates/zephium-webext-process/src/worlds.rs b/crates/zephium-webext-process/src/worlds.rs
+index ec6e0fd3..5a0ed971 100644
+--- a/crates/zephium-webext-process/src/worlds.rs
++++ b/crates/zephium-webext-process/src/worlds.rs
+@@ -14,7 +14,7 @@ use glib::gobject_ffi::{g_object_unref, g_signal_connect_data};
+ use crate::channel::{self, Sender};
+ use crate::{config, events};
+ use crate::ffi::*;
+-use crate::matching::any_matches;
++use crate::matching::{any_matches, is_restricted};
+ use crate::plugin::{is_extension_id, Group, RunAt, PLUGIN};
+ use crate::{EXTENSION_SCHEMES, KIND_CONTENT, KIND_PAGE};
+ 
+@@ -101,6 +101,9 @@ unsafe extern "C" fn main_world_cleared(
+         return;
+     }
+ 
++    if is_restricted(uri) {
++        return;
++    }
+     let main_frame = ok(webkit_frame_is_main_frame(frame));
+     // Copied out first: a content script may call back into the plugin.
+     let matching: Vec<(String, *mut WebKitScriptWorld, String, Vec<Group>)> = PLUGIN.with(|plugin| {
+diff --git a/desktop/src/lib.rs b/desktop/src/lib.rs
+index 0d718780..1bee7879 100644
+--- a/desktop/src/lib.rs
++++ b/desktop/src/lib.rs
+@@ -7312,6 +7312,12 @@ pub fn run() {
+                     EVENT_WEB_EXTENSION_STORE_CLICK,
+                     &click,
+                 ),
++                Projection::WebExtensionPackageFetched(path) => emit_to_privileged(
++                    &emit_handle,
++                    MAIN_LABEL,
++                    EVENT_WEB_EXTENSION_DROPPED,
++                    &path,
++                ),
+                 Projection::ExtensionActionShortcut(shortcut) => emit_to_privileged(
+                     &emit_handle,
+                     MAIN_LABEL,
