@@ -23,9 +23,15 @@ mod scheme;
 
 /// Log one step of the runtime when `ZEPHIUM_WEBEXT_TRACE` is set; silent
 /// otherwise. For finding where an extension stops working.
+/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
+pub(super) fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
+}
+
 macro_rules! trace {
     ($($argument:tt)*) => {
-        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        if $crate::host::webext_linux::tracing() {
             eprintln!("webext: {}", format!($($argument)*));
         }
     };
@@ -271,7 +277,8 @@ impl super::EngineHost {
             return;
         };
         let state = self.linux_extensions.profiles.entry(profile).or_default();
-        if state.context.is_none() {
+        let first = state.context.is_none();
+        if first {
             scheme::register(&context, &state.packages);
             if let Some(channel) = extension_channel::channel(&context) {
                 channel.set_handler(move |message| {
@@ -285,7 +292,11 @@ impl super::EngineHost {
             commands::listen(&view.webview(), profile, state.shortcuts.clone());
             menus::listen(&view.webview(), profile, state.menus.clone());
         }
-        self.linux_extensions_sync(profile);
+        // The first view brings the context the backgrounds need. A later
+        // view's page asks for the extension list itself when it is created.
+        if first {
+            self.linux_extensions_sync(profile);
+        }
         // The view is not among the profile's tabs until it is built.
         self.linux_dnr_add_to(profile, &view.webview());
     }
@@ -361,7 +372,7 @@ fn start_background(context: &WebContext, channel: &Rc<Channel>, install: &Insta
     trace!("background of {} starts at {url}", install.extension_id);
     // With the trace on, the page's console (script errors, refused loads)
     // goes to the log too.
-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+    if tracing() {
         if let Some(settings) = WebViewExt::settings(&view) {
             settings.set_enable_write_console_messages_to_stdout(true);
         }

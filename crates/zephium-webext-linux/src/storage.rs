@@ -53,20 +53,25 @@ impl Area {
     }
 
     pub fn set(&mut self, items: Map<String, Value>, quota: Option<usize>) -> Result<Changes, String> {
-        let mut next = self.items.clone();
+        // Copied only once something changes: extensions often write what
+        // they already stored.
+        let mut next: Option<Map<String, Value>> = None;
         let mut changes = Changes::new();
         for (key, value) in items {
-            let old = next.insert(key.clone(), value.clone());
-            if old.as_ref() != Some(&value) {
-                changes.insert(key, change(old, Some(value)));
+            if self.items.get(&key) == Some(&value) {
+                continue;
             }
+            let old = next.get_or_insert_with(|| self.items.clone()).insert(key.clone(), value.clone());
+            changes.insert(key, change(old, Some(value)));
         }
-        if let Some(quota) = quota {
-            if Value::Object(next.clone()).to_string().len() > quota {
-                return Err("QUOTA_BYTES quota exceeded".into());
-            }
+        let Some(next) = next else {
+            return Ok(changes);
+        };
+        let text = serialize(&next)?;
+        if quota.is_some_and(|quota| text.len() > quota) {
+            return Err("QUOTA_BYTES quota exceeded".into());
         }
-        self.commit(next)?;
+        self.commit(next, text)?;
         Ok(changes)
     }
 
@@ -76,18 +81,25 @@ impl Area {
             Value::Array(list) => list.iter().filter_map(Value::as_str).collect(),
             _ => Vec::new(),
         };
+        if !keys.iter().any(|key| self.items.contains_key(*key)) {
+            return Ok(Changes::new());
+        }
         let mut next = self.items.clone();
         let changes = keys
             .into_iter()
             .filter_map(|key| next.remove(key).map(|old| (key.to_owned(), change(Some(old), None))))
             .collect();
-        self.commit(next)?;
+        let text = serialize(&next)?;
+        self.commit(next, text)?;
         Ok(changes)
     }
 
     pub fn clear(&mut self) -> Result<Changes, String> {
+        if self.items.is_empty() {
+            return Ok(Changes::new());
+        }
         let changes = self.items.iter().map(|(key, old)| (key.clone(), change(Some(old.clone()), None))).collect();
-        self.commit(Map::new())?;
+        self.commit(Map::new(), b"{}".to_vec())?;
         Ok(changes)
     }
 
@@ -102,18 +114,22 @@ impl Area {
     }
 
     /// Write first, then keep: a failed write leaves the area as it was.
-    fn commit(&mut self, next: Map<String, Value>) -> Result<(), String> {
+    fn commit(&mut self, next: Map<String, Value>, text: Vec<u8>) -> Result<(), String> {
         if let Some(file) = &self.file {
             if let Some(parent) = file.parent() {
                 fs::create_dir_all(parent).map_err(|error| error.to_string())?;
             }
             let staged = file.with_extension("json.new");
-            fs::write(&staged, Value::Object(next.clone()).to_string()).map_err(|error| error.to_string())?;
+            fs::write(&staged, text).map_err(|error| error.to_string())?;
             fs::rename(&staged, file).map_err(|error| error.to_string())?;
         }
         self.items = next;
         Ok(())
     }
+}
+
+fn serialize(items: &Map<String, Value>) -> Result<Vec<u8>, String> {
+    serde_json::to_vec(items).map_err(|error| error.to_string())
 }
 
 fn change(old: Option<Value>, new: Option<Value>) -> Value {
@@ -169,5 +185,17 @@ mod tests {
         let file = dir.path().join("ext/local.json");
         Area::on_disk(file.clone()).unwrap().set(object(json!({"k": "v"})), None).unwrap();
         assert_eq!(Value::Object(Area::on_disk(file).unwrap().get(&Value::Null)), json!({"k": "v"}));
+    }
+
+    #[test]
+    fn unchanged_writes_leave_the_file_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("local.json");
+        let mut area = Area::on_disk(file.clone()).unwrap();
+        area.set(object(json!({"k": "v"})), None).unwrap();
+        std::fs::remove_file(&file).unwrap();
+        assert!(area.set(object(json!({"k": "v"})), None).unwrap().is_empty());
+        assert!(area.remove(&json!("missing")).unwrap().is_empty());
+        assert!(!file.exists());
     }
 }
