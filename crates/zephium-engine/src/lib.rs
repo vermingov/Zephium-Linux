@@ -4929,6 +4929,7 @@ mod tests {
             EngineEvent::NewWindowRequested {
                 id,
                 url: "https://late.invalid/popup".into(),
+                foreground: true,
             },
             EngineEvent::PermissionRequested {
                 id,
