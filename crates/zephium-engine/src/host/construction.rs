@@ -1,4 +1,3 @@
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 use super::dispatch::with_fullscreen_observation;
 #[cfg(target_os = "windows")]
 use super::dispatch::with_profile_exit;
@@ -2656,7 +2655,6 @@ impl EngineHost {
                 }
             })
         };
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let fullscreen_observer = {
             let fullscreen_id = id.clone();
             let fullscreen_permit = event_permit.clone();
@@ -2674,7 +2672,7 @@ impl EngineHost {
             {
                 crate::platform::macos::fullscreen::FullscreenObserver::install(&view, changed)
             }
-            #[cfg(target_os = "windows")]
+            #[cfg(not(target_os = "macos"))]
             match crate::platform::imp::install_fullscreen_observer(&view, changed) {
                 Ok(observer) => observer,
                 Err(error) => {
@@ -2842,7 +2840,6 @@ impl EngineHost {
             _audio_observer: audio_observer,
             #[cfg(target_os = "windows")]
             audio_observer,
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
             _fullscreen_observer: fullscreen_observer,
             replay_safety,
             discard_probe_lease: std::cell::RefCell::new(None),
