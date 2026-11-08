@@ -718,7 +718,6 @@ impl EngineHost {
             .clone();
         let site_scope =
             super::content_styles::ViewSiteScope::new(site_preferences, navigation, url);
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let popup_policy = Rc::new(super::popup_sites::ViewPopupPolicy::new(
             self.popup_sites_for(partition.profile()),
         ));
@@ -1488,6 +1487,63 @@ impl EngineHost {
                     report_blocked();
                 }
                 response
+            });
+        }
+
+        // WebKitGTK gives a new window no view of the browser's own, so the
+        // shell opens the address in a new tab instead. The same popup rules
+        // as a native tab apply; a refused one is shown on the tab.
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let source = id.clone();
+            let permit = event_permit.clone();
+            let tracker = navigation.clone();
+            let burst = Cell::new((std::time::Instant::now(), 0u8));
+            let last_blocked = Cell::new(None::<std::time::Instant>);
+            let popup_sink = self.sink.clone();
+            let popup_policy = popup_policy.clone();
+            builder = builder.with_new_window_req_handler(move |url, features| {
+                let user_initiated = popup_policy.admits(
+                    features.user_initiated,
+                    tracker
+                        .committed_snapshot()
+                        .as_ref()
+                        .map(|(_, committed)| committed.as_str()),
+                );
+                let now = std::time::Instant::now();
+                let (started, count) = burst.get();
+                let (started, count) =
+                    if now.duration_since(started) >= std::time::Duration::from_secs(1) {
+                        (now, 0)
+                    } else {
+                        (started, count)
+                    };
+                if !user_initiated || count >= 8 || !permit.allows_target(&url) {
+                    // One notice a second, however hard a script tries.
+                    if last_blocked.get().is_none_or(|old| {
+                        now.duration_since(old) >= std::time::Duration::from_secs(1)
+                    }) {
+                        last_blocked.set(Some(now));
+                        permit.emit(
+                            &popup_sink,
+                            EngineEvent::PageOpenBlocked {
+                                id: source.get(),
+                                url: Some(url),
+                            },
+                        );
+                    }
+                    return wry::NewWindowResponse::Deny;
+                }
+                burst.set((started, count + 1));
+                permit.emit(
+                    &popup_sink,
+                    EngineEvent::NewWindowRequested {
+                        id: source.get(),
+                        url,
+                        foreground: features.foreground,
+                    },
+                );
+                wry::NewWindowResponse::Deny
             });
         }
 

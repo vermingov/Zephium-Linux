@@ -203,6 +203,15 @@ fn bounded_webview_uri(webview: &WebView) -> Option<String> {
   unsafe { bounded_utf8_c_string(webkit_web_view_get_uri(webview.as_ptr()), PAGE_URL_LIMIT) }
 }
 
+/// For a link clicked with the middle button or Ctrl, whether the new tab
+/// comes to the front: only with Shift held as well.
+fn new_tab_click(action: &webkit2gtk::NavigationAction) -> Option<bool> {
+  let modifiers = gtk::gdk::ModifierType::from_bits_truncate(action.modifiers());
+  let new_tab = action.navigation_type() == webkit2gtk::NavigationType::LinkClicked
+    && (action.mouse_button() == 2 || modifiers.contains(gtk::gdk::ModifierType::CONTROL_MASK));
+  new_tab.then(|| modifiers.contains(gtk::gdk::ModifierType::SHIFT_MASK))
+}
+
 fn bounded_request_uri(request: &URIRequest) -> Option<String> {
   // SAFETY: WebKit owns the request and returned URI pointer through this call.
   unsafe { bounded_utf8_c_string(webkit_uri_request_get_uri(request.as_ptr()), PAGE_URL_LIMIT) }
@@ -927,7 +936,9 @@ impl InnerWebView {
     }
 
     // window creation handler
-    if let Some(new_window_req_handler) = attributes.new_window_req_handler.take() {
+    let new_window_req_handler: Option<Rc<dyn Fn(String, NewWindowFeatures) -> NewWindowResponse>> =
+      attributes.new_window_req_handler.take().map(Rc::from);
+    if let Some(new_window_req_handler) = new_window_req_handler.clone() {
       let related_webviews = Rc::new(Mutex::new(HashMap::new()));
       webview.connect_create(move |webview, action| {
         let url = action
@@ -937,7 +948,7 @@ impl InnerWebView {
           url.clone(),
           NewWindowFeatures {
             user_initiated: action.is_user_gesture(),
-            foreground: true,
+            foreground: new_tab_click(action).is_none_or(|foreground| foreground),
             size: None,
             position: None,
             opener: NewWindowOpener {
@@ -995,11 +1006,57 @@ impl InnerWebView {
 
     // Navigation handler
     if let Some(navigation_handler) = attributes.navigation_handler.take() {
-      webview.connect_decide_policy(move |_webview, policy_decision, policy_type| {
+      webview.connect_decide_policy(move |webview, policy_decision, policy_type| {
         let handler = match policy_type {
           PolicyDecisionType::NavigationAction => &navigation_handler,
           _ => return false,
         };
+
+        // A middle or Ctrl click on a link asks for a new tab, as Command
+        // and middle clicks do in the macOS backend.
+        if let Some(open) = &new_window_req_handler {
+          let action = policy_decision
+            .dynamic_cast_ref::<NavigationPolicyDecision>()
+            .and_then(NavigationPolicyDecisionExt::navigation_action);
+          if let Some((action, foreground)) =
+            action.and_then(|action| new_tab_click(&action).map(|foreground| (action, foreground)))
+          {
+            let Some((request, url)) = action
+              .request()
+              .and_then(|request| bounded_request_uri(&request).map(|url| (request, url)))
+            else {
+              unsafe { webkit_policy_decision_ignore(policy_decision.as_ptr()) };
+              return true;
+            };
+            let response = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+              open(
+                url,
+                NewWindowFeatures {
+                  user_initiated: true,
+                  foreground,
+                  size: None,
+                  position: None,
+                  opener: NewWindowOpener {
+                    webview: webview.clone(),
+                  },
+                },
+              )
+            }))
+            .unwrap_or(NewWindowResponse::Deny);
+            match response {
+              NewWindowResponse::Create { webview: created } => {
+                created.load_request(&request);
+                unsafe { webkit_policy_decision_ignore(policy_decision.as_ptr()) };
+                return true;
+              }
+              NewWindowResponse::Deny => {
+                unsafe { webkit_policy_decision_ignore(policy_decision.as_ptr()) };
+                return true;
+              }
+              NewWindowResponse::Allow => {}
+            }
+          }
+        }
 
         // Missing action/request/URI state during navigation or teardown must
         // not fall back to WebKit's default allow path.

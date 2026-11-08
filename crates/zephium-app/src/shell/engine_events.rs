@@ -457,7 +457,11 @@ impl Shell {
                     self.close_owned_native_tab(id);
                 }
             }
-            EngineEvent::NewWindowRequested { id, url } => self.open_linked_tab(id, &url),
+            EngineEvent::NewWindowRequested {
+                id,
+                url,
+                foreground,
+            } => self.open_linked_tab(id, &url, foreground),
             EngineEvent::WorkPageFavicon {
                 profile,
                 page_url,

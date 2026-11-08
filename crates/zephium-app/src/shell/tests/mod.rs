@@ -2269,6 +2269,7 @@ fn apply_projection(view: &mut ItemsState, p: Projection) {
         Projection::WebExtensionAccessRequest(_) => {}
         Projection::WebExtensionAccessRemoved(_) => {}
         Projection::WebExtensionStoreClick(_) => {}
+        Projection::WebExtensionPackageFetched(_) => {}
         Projection::Favicons(_) => {}
         Projection::PanelOwner(_) => {}
         Projection::UiCommand(_) => {}

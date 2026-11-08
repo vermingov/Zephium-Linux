@@ -208,6 +208,7 @@ fn forged_runtime_ids_cannot_cross_the_focused_space_or_profile() {
         shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
             id: attacker,
             url: "https://popup.example/".into(),
+            foreground: true,
         }));
         shell.handle(Command::Close(attacker));
 
@@ -259,12 +260,45 @@ fn linked_tab_shows_alone_and_split_group_survives() {
     shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
         id: second,
         url: "https://wikipedia.org/".into(),
+        foreground: true,
     }));
     assert_eq!(engine.last_layout().len(), 1);
 
     // returning to a member restores the whole group
     shell.handle(Command::Activate(first));
     assert_eq!(engine.last_layout().len(), 2);
+}
+
+#[test]
+fn middle_clicked_link_opens_behind_its_source() {
+    let (mut shell, _engine, screen) = setup();
+    shell.handle(Command::Bootstrap);
+    let first = active_id(&screen);
+    shell.handle(Command::Navigate {
+        id: first,
+        input: "example.com".into(),
+    });
+    shell.handle(Command::Open);
+    let last = active_id(&screen);
+    shell.handle(Command::Activate(first));
+
+    shell.handle(Command::Engine(EngineEvent::NewWindowRequested {
+        id: first,
+        url: "https://wikipedia.org/".into(),
+        foreground: false,
+    }));
+
+    assert_eq!(active_id(&screen), first);
+    let window = shell.windows.focused().unwrap();
+    let roots = shell.items.roots(Placement::Space {
+        space: window.space,
+        section: SpaceSection::Today,
+    });
+    let at = roots.iter().position(|id| *id == first).unwrap();
+    let opened = roots[at + 1];
+    assert_ne!(opened, last);
+    assert_eq!(roots[at + 2], last);
+    assert!(shell.items.tab(opened).is_some());
 }
 
 #[test]

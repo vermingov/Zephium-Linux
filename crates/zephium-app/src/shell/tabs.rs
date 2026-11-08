@@ -896,8 +896,9 @@ impl Shell {
     /// `x`/`y` are window coords (the desktop layer normalizes per platform).
     /// window.open / target=_blank lands as a new Today tab next to its
     /// source, routed through the same navigation policy. The split group
-    /// survives: the new tab shows alone, the group stays a tab away.
-    pub(super) fn open_linked_tab(&mut self, source: ItemId, url: &str) {
+    /// survives: the new tab shows alone, the group stays a tab away. A
+    /// background tab goes right after its source, as a native one does.
+    pub(super) fn open_linked_tab(&mut self, source: ItemId, url: &str, foreground: bool) {
         let Some((profile, space)) = self.windows.focused().map(|win| (win.profile, win.space))
         else {
             return;
@@ -905,17 +906,27 @@ impl Shell {
         if !self.item_in_scope(source, profile, space) {
             return;
         }
+        let placement = Placement::Space {
+            space,
+            section: SpaceSection::Today,
+        };
         let id = ItemId::generate();
-        if !self.items.insert_tab(
-            id,
-            Placement::Space {
-                space,
-                section: SpaceSection::Today,
-            },
-        ) {
+        if !self.items.insert_tab(id, placement) {
             return;
         }
-        let mut fx = self.focus_tab(id);
+        let mut fx = if foreground {
+            self.focus_tab(id)
+        } else {
+            let siblings = self.items.roots(placement);
+            let next = siblings
+                .iter()
+                .position(|sibling| *sibling == source)
+                .and_then(|index| siblings.get(index + 1))
+                .copied()
+                .filter(|next| *next != id);
+            self.items.move_tab_to_root(id, placement, next);
+            Default::default()
+        };
         fx.extend(self.items.navigate(id, url));
         self.commit(fx);
     }

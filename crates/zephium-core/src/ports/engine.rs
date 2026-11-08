@@ -1925,6 +1925,8 @@ pub enum EngineEvent {
     NewWindowRequested {
         id: ItemId,
         url: String,
+        /// False for a middle or Ctrl click: the tab opens behind its source.
+        foreground: bool,
     },
     PermissionRequested {
         id: ItemId,
