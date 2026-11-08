@@ -178,6 +178,7 @@ webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zephium-work-composition = { workspace = true, optional = true }
+libc = "0.2"
 async-io = "=2.6.0"
 futures-lite = "=2.6.1"
 x11rb = { version = "=0.13.2", features = ["xkb"] }
