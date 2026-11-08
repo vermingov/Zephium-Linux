@@ -1,5 +1,5 @@
 //! The web platform features a modern site expects, where WebKitGTK leaves
-//! them off by default: WebRTC (calls, voice chat) and WebGPU.
+//! them off by default: WebRTC (calls, voice chat), WebGPU and encrypted media.
 
 use std::ffi::{c_char, c_void, CStr};
 
@@ -24,6 +24,8 @@ pub(crate) fn enable(view: &WebView) {
         return;
     };
     settings.set_enable_webrtc(true);
+    settings.set_enable_mediasource(true);
+    settings.set_enable_encrypted_media(true);
     let raw_settings: *mut webkit2gtk::ffi::WebKitSettings = settings.to_glib_none().0;
     // SAFETY: the list is owned here until unreffed; features are borrowed
     // from it and identifiers are static strings.

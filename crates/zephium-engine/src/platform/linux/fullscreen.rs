@@ -50,6 +50,7 @@ fn listen_for_escape(view: &WebView, escape: &EscapeKey) {
         if event.keyval() != gtk::gdk::keys::constants::Escape {
             return gtk::glib::Propagation::Proceed;
         }
+        trace("Escape while fullscreen");
         ask_to_leave(&page);
         gtk::glib::Propagation::Stop
     });
@@ -78,6 +79,7 @@ pub(crate) fn install_fullscreen_observer(view: &wry::WebView, changed: impl Fn(
     let escape: EscapeKey = Rc::default();
     let (on_enter, entered_escape) = (changed.clone(), escape.clone());
     let enter = view.connect_enter_fullscreen(move |view| {
+        trace("entering");
         set_state(view, true);
         listen_for_escape(view, &entered_escape);
         on_enter();
@@ -86,6 +88,7 @@ pub(crate) fn install_fullscreen_observer(view: &wry::WebView, changed: impl Fn(
     });
     let left_escape = escape.clone();
     let leave = view.connect_leave_fullscreen(move |view| {
+        trace("leaving");
         set_state(view, false);
         release(&left_escape);
         changed();
@@ -113,12 +116,25 @@ pub(crate) fn exit_fullscreen(view: &wry::WebView) {
     ask_to_leave(&view.webview());
 }
 
+/// The request, from the private world; the page's own world is the
+/// fallback when that one cannot run it.
 fn ask_to_leave(view: &WebView) {
-    view.evaluate_javascript(
-        "document.fullscreenElement && document.exitFullscreen()",
-        Some(EXIT_WORLD),
-        None,
-        None::<&gtk::gio::Cancellable>,
-        |_| {},
-    );
+    const LEAVE: &str = "document.fullscreenElement ? (document.exitFullscreen(), true) : false";
+    let page = view.clone();
+    view.evaluate_javascript(LEAVE, Some(EXIT_WORLD), None, None::<&gtk::gio::Cancellable>, move |result| {
+        if let Err(error) = result {
+            trace(&format!("leaving from the private world failed: {error}"));
+            page.evaluate_javascript(LEAVE, None, None, None::<&gtk::gio::Cancellable>, |result| {
+                if let Err(error) = result {
+                    trace(&format!("leaving from the page's world failed: {error}"));
+                }
+            });
+        }
+    });
+}
+
+fn trace(step: &str) {
+    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+        eprintln!("fullscreen: {step}");
+    }
 }
