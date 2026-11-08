@@ -105,6 +105,19 @@ fn on_domain(cookie: &Value, domain: &str) -> bool {
     host == domain || host.ends_with(&format!(".{domain}"))
 }
 
+/// The policy `cookies.set` asks for; `None` keeps libsoup's Lax, as Chrome
+/// treats an unspecified one. libsoup drops a SameSite=None cookie without
+/// Secure, and Chrome refuses it.
+fn same_site(details: &Value) -> Result<Option<soup::SameSitePolicy>, &'static str> {
+    match details["sameSite"].as_str() {
+        Some("strict") => Ok(Some(soup::SameSitePolicy::Strict)),
+        Some("lax") => Ok(Some(soup::SameSitePolicy::Lax)),
+        Some("no_restriction") if details["secure"] != true => Err("A cookie with sameSite \"no_restriction\" must be secure."),
+        Some("no_restriction") => Ok(Some(soup::SameSitePolicy::None)),
+        _ => Ok(None),
+    }
+}
+
 fn matches_filter(cookie: &Value, filter: &Value) -> bool {
     filter["name"].as_str().is_none_or(|name| cookie["name"] == name)
         && filter["domain"].as_str().is_none_or(|domain| on_domain(cookie, domain))
@@ -179,11 +192,11 @@ impl super::super::EngineHost {
                 );
                 cookie.set_secure(details["secure"] == true);
                 cookie.set_http_only(details["httpOnly"] == true);
-                cookie.set_same_site_policy(match details["sameSite"].as_str() {
-                    Some("strict") => soup::SameSitePolicy::Strict,
-                    Some("lax") => soup::SameSitePolicy::Lax,
-                    _ => soup::SameSitePolicy::None,
-                });
+                match same_site(&details) {
+                    Ok(Some(policy)) => cookie.set_same_site_policy(policy),
+                    Ok(None) => {}
+                    Err(reason) => return message.reply(&error(id, reason)),
+                }
                 if let Some(expires) = details["expirationDate"].as_f64().and_then(|seconds| gtk::glib::DateTime::from_unix_utc(seconds as i64).ok()) {
                     cookie.set_expires(&expires);
                 }
@@ -228,5 +241,13 @@ mod tests {
         assert!(matches_filter(&cookie, &json!({ "name": "sid", "secure": true })));
         assert!(!matches_filter(&cookie, &json!({ "session": true })));
         assert_eq!(site_of(&cookie), "https://example.com/");
+    }
+
+    #[test]
+    fn same_site_keeps_what_libsoup_stores() {
+        assert_eq!(same_site(&json!({ "url": "https://example.com/" })), Ok(None));
+        assert_eq!(same_site(&json!({ "sameSite": "strict" })), Ok(Some(soup::SameSitePolicy::Strict)));
+        assert!(same_site(&json!({ "sameSite": "no_restriction" })).is_err());
+        assert_eq!(same_site(&json!({ "sameSite": "no_restriction", "secure": true })), Ok(Some(soup::SameSitePolicy::None)));
     }
 }
