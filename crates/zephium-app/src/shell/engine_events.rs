@@ -659,6 +659,11 @@ impl Shell {
             EngineEvent::StoreButtonClicked { id, extension } => {
                 self.store_button_clicked(id, extension);
             }
+            EngineEvent::WebExtensionPackageFetched { path, .. } => {
+                (self.emit)(Projection::WebExtensionPackageFetched(
+                    path.to_string_lossy().into_owned(),
+                ));
+            }
             EngineEvent::FindResult {
                 id,
                 query,
@@ -836,7 +841,8 @@ impl Shell {
             EngineEvent::ExtensionActionsSnapshotSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionSettled { profile, .. } => Some(*profile),
             EngineEvent::ExtensionActionsInvalidated { profile } => Some(*profile),
-            EngineEvent::WebExtensionSettled { profile, .. } => Some(*profile),
+            EngineEvent::WebExtensionSettled { profile, .. }
+            | EngineEvent::WebExtensionPackageFetched { profile, .. } => Some(*profile),
             EngineEvent::WebExtensionAccessRequested(request) => Some(request.profile),
             EngineEvent::WebExtensionAccessRemoved(removal) => Some(removal.profile),
             // Answered even during retirement, so the extension hears why.

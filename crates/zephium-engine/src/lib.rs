@@ -1132,7 +1132,8 @@ impl RetirementGate {
             | event @ EngineEvent::WebExtensionAccessRequested(_)
             | event @ EngineEvent::WebExtensionAccessRemoved(_)
             | event @ EngineEvent::WebExtensionDataRequested(_) => Some(event),
-            event @ EngineEvent::WebExtensionDataInterest { profile, .. } => {
+            event @ EngineEvent::WebExtensionDataInterest { profile, .. }
+            | event @ EngineEvent::WebExtensionPackageFetched { profile, .. } => {
                 self.profile_is_active(profile).then_some(event)
             }
             EngineEvent::WebExtensionSettled {
@@ -3387,9 +3388,9 @@ impl Engine for WebviewEngine {
     }
 
     fn show_store_button(&self, id: ItemId, button: zephium_core::ports::engine::StoreButton) {
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(unix, target_os = "windows"))]
         let _ = self.run_for_active_item(id, move |h| h.show_store_button(id, button));
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(unix, target_os = "windows")))]
         let _ = (id, button);
     }
 

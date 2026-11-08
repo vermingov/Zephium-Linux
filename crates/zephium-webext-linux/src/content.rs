@@ -31,20 +31,57 @@ pub fn groups(package: &Path, manifest: &Manifest) -> Result<Vec<Group>, String>
         .into_iter()
         .filter(|script| script.world == World::Isolated)
         .map(|script| {
-            Ok(Group {
-                js: read_all(package, &script.js)?,
-                css: read_all(package, &script.css)?,
-                matches: script.matches,
-                exclude_matches: script.exclude_matches,
-                run_at: match script.run_at {
-                    RunAt::DocumentStart => "document_start",
-                    RunAt::DocumentEnd => "document_end",
-                    RunAt::DocumentIdle => "document_idle",
-                },
-                all_frames: script.all_frames,
-            })
+            let run_at = match script.run_at {
+                RunAt::DocumentStart => "document_start",
+                RunAt::DocumentEnd => "document_end",
+                RunAt::DocumentIdle => "document_idle",
+            };
+            group(package, script.matches, script.exclude_matches, &script.js, &script.css, run_at, script.all_frames)
         })
         .collect()
+}
+
+/// One group with its files' text: a manifest entry, or a script the
+/// extension registered at run time.
+pub fn group(
+    package: &Path,
+    matches: Vec<String>,
+    exclude_matches: Vec<String>,
+    js: &[String],
+    css: &[String],
+    run_at: &'static str,
+    all_frames: bool,
+) -> Result<Group, String> {
+    Ok(Group { js: read_all(package, js)?, css: read_all(package, css)?, matches, exclude_matches, run_at, all_frames })
+}
+
+/// The groups as the web-process plugin runs them: scripts only. A group's
+/// CSS goes into the page at `document_start` whatever the group's timing,
+/// as Chrome inserts it before the page is built, so it becomes a group of
+/// its own that adds the styles.
+pub fn runnable(groups: Vec<Group>) -> Vec<Group> {
+    groups
+        .into_iter()
+        .flat_map(|group| {
+            let styles = (!group.css.is_empty()).then(|| Group {
+                js: vec![style_inserter(&group.css)],
+                css: Vec::new(),
+                run_at: "document_start",
+                ..group.clone()
+            });
+            let scripts = (!group.js.is_empty()).then(|| Group { css: Vec::new(), ..group });
+            styles.into_iter().chain(scripts)
+        })
+        .collect()
+}
+
+/// A script that adds `css` to the document as soon as it has a root
+/// element; at `document_start` it has none yet.
+fn style_inserter(css: &[String]) -> String {
+    let text = serde_json::Value::String(css.join("\n"));
+    format!(
+        r#"(() => {{ const style = document.createElement("style"); style.textContent = {text}; const place = () => (document.head || document.documentElement).append(style); if (document.documentElement) place(); else new MutationObserver((_, observer) => {{ if (document.documentElement) {{ observer.disconnect(); place(); }} }}).observe(document, {{ childList: true }}); }})()"#
+    )
 }
 
 fn read_all(package: &Path, paths: &[String]) -> Result<Vec<String>, String> {
@@ -92,6 +129,24 @@ mod tests {
         assert_eq!(groups[0].css, ["p{}"]);
         assert_eq!(groups[0].run_at, "document_start");
         assert!(groups[0].all_frames);
+    }
+
+    #[test]
+    fn css_runs_at_document_start_in_a_group_of_its_own() {
+        let group = Group {
+            matches: vec!["<all_urls>".into()],
+            exclude_matches: Vec::new(),
+            js: vec!["one()".into()],
+            css: vec!["p { color: red }".into()],
+            run_at: "document_idle",
+            all_frames: false,
+        };
+        let groups = runnable(vec![group.clone(), Group { js: Vec::new(), ..group }]);
+        assert_eq!(groups.len(), 3, "styles and scripts, then styles alone");
+        assert_eq!(groups[0].run_at, "document_start");
+        assert!(groups[0].js[0].contains("p { color: red }"));
+        assert_eq!((groups[1].run_at, groups[1].js.as_slice()), ("document_idle", ["one()".to_owned()].as_slice()));
+        assert!(groups.iter().all(|group| group.css.is_empty()));
     }
 
     #[test]

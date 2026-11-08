@@ -146,6 +146,8 @@ impl EngineHost {
         }
         #[cfg(target_os = "windows")]
         self.reconcile_windows_extension_popup(&surface);
+        #[cfg(all(unix, not(target_os = "macos")))]
+        self.linux_surface_changed(&surface);
         self.extension_browser_surfaces.insert(profile, surface);
         true
     }
