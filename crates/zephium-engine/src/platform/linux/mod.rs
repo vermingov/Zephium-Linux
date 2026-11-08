@@ -1,10 +1,13 @@
 //! Linux adapter. Content views are built into a gtk::Fixed owned by the
 //! composition root; the stage positions them and draws the drop indicator.
 
+mod addon_download;
+mod amo_button;
 mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
 mod stage;
+pub(crate) mod store_button;
 
 pub(crate) fn external_app_name(_url: &str) -> Option<String> {
     None
@@ -15,6 +18,7 @@ pub(crate) fn open_external_app(_url: &str) -> bool {
 }
 
 pub(crate) use content_filter::{
+    add_to_view as add_content_policy_to_view, remove_from_view as remove_content_policy_from_view,
     compile as compile_content_policy, content_policy_digest, enumerate_content_policy_cache,
     install_scoped_on_view as install_scoped_content_policy_on_view,
     remove_content_policy_cache_identifier, same_policy as same_content_policy,
@@ -434,6 +438,11 @@ pub fn configure(
         context.connect_download_started(|_, download| download.cancel());
         // SAFETY: see the typed private-key invariant above.
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+    }
+    // Private profiles run no extensions, so they take no add-on either.
+    if !expected_ephemeral {
+        addon_download::offer_for_review(&view, partition.profile());
+        amo_button::install(&view);
     }
 
     // Extensions never run in private profiles, so their contexts get no

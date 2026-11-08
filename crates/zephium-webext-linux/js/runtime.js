@@ -70,6 +70,16 @@
     };
   }
 
+  // An answer known in this context, delivered as a method's would be.
+  function answer(value) {
+    return (...args) => {
+      const callback = typeof args[args.length - 1] === "function" ? args.pop() : null;
+      if (!callback) return Promise.resolve(value);
+      queueMicrotask(() => callback(value));
+      return undefined;
+    };
+  }
+
   // ---- Events ---------------------------------------------------------------
 
   class ExtensionEvent {
@@ -270,6 +280,7 @@
       return entry.replace(/\$(\d)/g, (_, index) => values[Number(index) - 1] ?? "");
     },
     getUILanguage: () => info.uiLanguage,
+    detectLanguage: answer({ isReliable: false, languages: [] }),
     getAcceptLanguages: method("i18n.getAcceptLanguages"),
   };
 
@@ -277,6 +288,12 @@
     getURL: runtime.getURL,
     inIncognitoContext: false,
     isAllowedIncognitoAccess: method("extension.isAllowedIncognitoAccess"),
+    // The port gives extensions no access to file:// pages.
+    isAllowedFileSchemeAccess: answer(false),
+    // Each context runs in a process of its own: no other context's window
+    // can be handed over.
+    getViews: () => [],
+    getBackgroundPage: () => null,
   };
 
   const storage = {
@@ -328,6 +345,21 @@
           return method("scripting.executeScript")({ ...rest, code }, callback);
         },
         insertCSS: undefined, removeCSS: undefined,
+        registerContentScripts: undefined, getRegisteredContentScripts: undefined,
+        unregisterContentScripts: undefined, updateContentScripts: undefined,
+      }),
+      declarativeNetRequest: Object.assign(namespace("declarativeNetRequest", {
+        getEnabledRulesets: undefined, updateEnabledRulesets: undefined,
+        getDynamicRules: undefined, updateDynamicRules: undefined,
+        getSessionRules: undefined, updateSessionRules: undefined,
+        isRegexSupported: undefined, getAvailableStaticRuleCount: undefined,
+        getDisabledRuleIds: undefined, updateStaticRules: undefined,
+        getMatchedRules: undefined, setExtensionActionOptions: undefined,
+      }, ["onRuleMatchedDebug"]), {
+        MAX_NUMBER_OF_ENABLED_STATIC_RULESETS: 50, MAX_NUMBER_OF_STATIC_RULESETS: 100,
+        MAX_NUMBER_OF_DYNAMIC_RULES: 30000, MAX_NUMBER_OF_SESSION_RULES: 5000,
+        MAX_NUMBER_OF_REGEX_RULES: 1000, GUARANTEED_MINIMUM_STATIC_RULES: 30000,
+        DYNAMIC_RULESET_ID: "_dynamic", SESSION_RULESET_ID: "_session",
       }),
       alarms: namespace("alarms", {
         create: undefined, get: undefined, getAll: undefined, clear: undefined, clearAll: undefined,
@@ -353,6 +385,20 @@
       webNavigation: namespace("webNavigation", { getFrame: undefined, getAllFrames: undefined },
         ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred",
           "onHistoryStateUpdated", "onReferenceFragmentUpdated"]),
+    });
+    // Present so a background that listens at start keeps running; WebKitGTK
+    // gives the port no hook into requests, so these events never fire.
+    Object.assign(chrome, {
+      webRequest: namespace("webRequest", { handlerBehaviorChanged: answer(undefined) },
+        ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
+          "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]),
+      idle: namespace("idle", { queryState: answer("active"), setDetectionInterval: answer(undefined) }, ["onStateChanged"]),
+      management: namespace("management", {
+        getSelf: answer({
+          id: info.id, name: info.manifest.name, version: info.manifest.version, enabled: true,
+          installType: "normal", type: "extension", mayDisable: true,
+        }),
+      }, ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]),
     });
     // Firefox's name for contextMenus.
     chrome.menus = chrome.contextMenus;

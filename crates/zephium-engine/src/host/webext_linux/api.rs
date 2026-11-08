@@ -16,7 +16,7 @@ use zephium_core::extensions::{
 use zephium_core::ids::{ItemId, ProfileId};
 use zephium_core::ports::engine::EngineEvent;
 use zephium_webext_linux::storage::{Area, Changes, LOCAL_QUOTA};
-use zephium_webext_process::matching::any_matches;
+use zephium_webext_process::matching::{any_matches, is_restricted};
 
 use super::routing::{error, ok, raise, Endpoint};
 use crate::platform::imp::extension_channel::{Message, SenderKind};
@@ -77,9 +77,13 @@ impl super::super::EngineHost {
             return message.reply(&error(id, "The extension is not running."));
         }
         let from = Endpoint { view: message.view.clone(), frame: message.frame_id };
+        super::trace!("{} calls {api}", message.extension_id);
         let reply_with = |message: Message, result: Result<Value, String>| match result {
             Ok(value) => message.reply(&ok(id, value)),
-            Err(reason) => message.reply(&error(id, &reason)),
+            Err(reason) => {
+                super::trace!("{} call failed: {reason}", message.extension_id);
+                message.reply(&error(id, &reason))
+            }
         };
         // The calls that answer later take the request itself.
         match api.as_str() {
@@ -162,6 +166,9 @@ impl super::super::EngineHost {
         };
         let url = view.uri().map(|uri| uri.to_string()).unwrap_or_default();
         let install = self.linux_extensions.profiles.get(&profile).and_then(|state| state.install(extension_id)).ok_or("The extension is not running.")?;
+        if is_restricted(&url) {
+            return Err("The extensions gallery cannot be scripted.".into());
+        }
         let allowed = install.active_tabs.contains(&item) || any_matches(&install.hosts, &url);
         if !allowed {
             return Err("Cannot access contents of the page. Extension manifest must request permission to access the respective host.".into());
@@ -197,6 +204,8 @@ impl super::super::EngineHost {
                 _ => unsupported(api),
             },
             "storage" => self.linux_storage(profile, extension_id, method, args),
+            "declarativeNetRequest" => self.linux_dnr(profile, extension_id, method, args),
+            "scripting" => self.linux_registered(profile, extension_id, method, args),
             "tabs" => self.linux_tabs(profile, message, from, method, args),
             "windows" => self.linux_windows(profile, message, method, args),
             "action" => self.linux_action_call(profile, extension_id, method, args),
@@ -350,7 +359,8 @@ impl super::super::EngineHost {
                 windows.into_iter().find(|window| window["id"] == wanted).ok_or_else(|| "No window with that id.".into())
             }
             "getCurrent" | "getLastFocused" => {
-                let current = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone());
+                let current =
+                    self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
                 Ok(windows
                     .iter()
                     .find(|window| current.as_ref().is_some_and(|id| &window["id"] == id))
@@ -498,8 +508,23 @@ impl super::super::EngineHost {
 
     fn linux_focused_tab(&self, profile: ProfileId) -> Option<ItemId> {
         let surface = self.extension_browser_surfaces.get(&profile)?;
-        let window = surface.windows().iter().find(|window| Some(window.id()) == surface.focused()).or(surface.windows().first())?;
+        let current = self.linux_current_window(profile);
+        let window = surface.windows().iter().find(|window| Some(window.id()) == current).or(surface.windows().first())?;
         window.active()
+    }
+
+    /// The focused browser window, or the one that last was while a popup
+    /// window has focus.
+    fn linux_current_window(&self, profile: ProfileId) -> Option<zephium_core::ids::WindowId> {
+        let surface = self.extension_browser_surfaces.get(&profile)?;
+        let remembered = self.linux_extensions.profiles.get(&profile).and_then(|state| state.last_focused);
+        surface.focused().or(remembered).filter(|id| surface.windows().iter().any(|window| window.id() == *id))
+    }
+
+    fn linux_current_window_number(&mut self, profile: ProfileId) -> Option<Value> {
+        let window = self.linux_current_window(profile)?;
+        let state = self.linux_extensions.profiles.get_mut(&profile)?;
+        Some(json!(state.routing.windows.number(window)))
     }
 
     /// Every view of the profile's tabs, for events every context gets.
@@ -549,10 +574,7 @@ impl super::super::EngineHost {
         public_windows(&surface)
             .map(|window| {
                 let id = state.routing.windows.number(window.id());
-                let mut value = json!({
-                    "id": id, "focused": surface.focused() == Some(window.id()), "incognito": false,
-                    "type": "normal", "state": "normal", "alwaysOnTop": false,
-                });
+                let mut value = window_value(id, surface.focused() == Some(window.id()));
                 if populate {
                     value["tabs"] = Value::Array(window.tabs().iter().enumerate().map(|(index, tab)| tab_value(state, window, index, tab)).collect());
                 }
@@ -575,10 +597,8 @@ impl super::super::EngineHost {
     }
 
     fn linux_query_tabs(&mut self, profile: ProfileId, message: &Message, query: &Value) -> Vec<Value> {
-        let current_window = self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| {
-            let windows = self.linux_all_windows(profile, false);
-            windows.iter().find(|window| window["focused"] == true).map(|window| window["id"].clone())
-        });
+        let current_window =
+            self.linux_sender_tab(profile, message).map(|tab| tab["windowId"].clone()).or_else(|| self.linux_current_window_number(profile));
         let wants_current = query["currentWindow"].as_bool() == Some(true)
             || query["lastFocusedWindow"].as_bool() == Some(true)
             || query["windowId"].as_i64() == Some(-2);
@@ -674,11 +694,15 @@ fn linux_notification(extension_id: &str, method: &str, args: &[Value]) -> Resul
     }
 }
 
-fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
+pub(super) fn public_windows(surface: &ExtensionBrowserSurface) -> impl Iterator<Item = &ExtensionBrowserWindow> {
     surface.windows().iter().filter(|window| !window.is_private())
 }
 
-fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
+pub(super) fn window_value(id: i64, focused: bool) -> Value {
+    json!({ "id": id, "focused": focused, "incognito": false, "type": "normal", "state": "normal", "alwaysOnTop": false })
+}
+
+pub(super) fn tab_value(state: &mut super::ProfileExtensions, window: &ExtensionBrowserWindow, index: usize, tab: &ExtensionBrowserTab) -> Value {
     let active = window.active() == Some(tab.id());
     json!({
         "id": state.routing.tabs.number(tab.id()),

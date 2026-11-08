@@ -7,6 +7,7 @@
 //! design and the protocol are in the Linux port's docs/extensions.md.
 
 pub mod content;
+pub mod dnr;
 pub mod info;
 pub mod storage;
 

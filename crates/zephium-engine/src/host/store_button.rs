@@ -27,8 +27,8 @@ const BACKGROUND_POLL_INTERVAL: Duration = Duration::from_secs(2);
 pub(super) struct StoreButtonSlot {
     shown: Option<StoreButton>,
     last_click: Option<Instant>,
-    #[cfg(target_os = "macos")]
-    native: Option<crate::platform::macos::store_button::StoreButton>,
+    #[cfg(unix)]
+    native: Option<crate::platform::imp::store_button::StoreButton>,
     #[cfg(target_os = "windows")]
     poll: Option<crate::platform::imp::ContentPolicyTimeout>,
     // The armed poll is the fast one, so the window coming back has nothing
@@ -42,9 +42,9 @@ pub(super) struct StoreButtonSlot {
 }
 
 impl StoreButtonSlot {
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     pub(super) fn native(
-        native: Option<crate::platform::macos::store_button::StoreButton>,
+        native: Option<crate::platform::imp::store_button::StoreButton>,
     ) -> Self {
         Self {
             native,
@@ -104,6 +104,10 @@ impl EngineHost {
     }
 
     pub(crate) fn show_store_button(&mut self, id: ItemId, button: StoreButton) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+            eprintln!("store button: asked to show {} on a view showing {:?}", button.extension, self.committed_listing(id));
+        }
         let label_chars = button.label.chars().count();
         if label_chars == 0
             || label_chars > MAX_STORE_BUTTON_LABEL_CHARS
@@ -153,7 +157,7 @@ impl EngineHost {
         let Some(state) = view.store_button.shown.as_ref().map(encode) else {
             return;
         };
-        #[cfg(target_os = "macos")]
+        #[cfg(unix)]
         if let Some(native) = &view.store_button.native {
             native.show(&state);
         }
@@ -191,13 +195,13 @@ impl EngineHost {
         );
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(unix)]
     pub(super) fn store_button_message(
         &mut self,
         id: ItemId,
-        message: crate::platform::macos::store_button::StoreMessage,
+        message: crate::platform::imp::store_button::StoreMessage,
     ) {
-        use crate::platform::macos::store_button::StoreMessage;
+        use crate::platform::imp::store_button::StoreMessage;
         match message {
             StoreMessage::Ready => self.send_store_button(id),
             StoreMessage::Clicked(extension) => self.store_button_clicked(id, extension.as_str()),

@@ -1656,6 +1656,12 @@ pub enum EngineEvent {
         install: ExtensionInstallId,
         result: Result<WebExtensionLoaded, String>,
     },
+    /// An extension package the person downloaded from an add-on store, saved
+    /// at `path` for the install review.
+    WebExtensionPackageFetched {
+        profile: ProfileId,
+        path: std::path::PathBuf,
+    },
     /// An extension asked at run time for access the user must approve;
     /// answered through [`EnginePort::answer_web_extension_access`].
     WebExtensionAccessRequested(Box<WebExtensionAccessRequest>),

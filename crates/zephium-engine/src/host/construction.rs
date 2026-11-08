@@ -2441,6 +2441,22 @@ impl EngineHost {
                 ),
             )
         };
+        #[cfg(all(unix, not(target_os = "macos")))]
+        let store_button = if matches!(partition, Partition::Ephemeral(_)) {
+            super::store_button::StoreButtonSlot::default()
+        } else {
+            let tab = id.clone();
+            super::store_button::StoreButtonSlot::native(
+                crate::platform::imp::store_button::StoreButton::install(
+                    &wry::WebViewExtUnix::webview(&view),
+                    move |message| {
+                        let tab = tab.get();
+                        let _ =
+                            super::try_with(move |host| host.store_button_message(tab, message));
+                    },
+                ),
+            )
+        };
         #[cfg(target_os = "windows")]
         let request_witness = crate::platform::imp::RequestWitness::install(
             wry::WebViewExtWindows::webview(&view),
@@ -2901,7 +2917,7 @@ impl EngineHost {
             #[cfg(target_os = "windows")]
             native_terminal_failure: self.native_terminal_failure.clone(),
             find: None,
-            #[cfg(target_os = "macos")]
+            #[cfg(unix)]
             store_button,
             #[cfg(target_os = "windows")]
             store_button: Default::default(),
