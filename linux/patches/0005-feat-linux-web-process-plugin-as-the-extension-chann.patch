@@ -1,0 +1,853 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 16:54:20 +0100
+Subject: [PATCH 5/9] feat(linux): web-process plugin as the extension channel
+
+WebKitGTK has no extension runtime, and upstream keeps its isolated-world
+message handler out of product builds: WebKit rebuilds a message in the
+browser process before Rust can bound it, and extension code can call the
+raw handler directly.
+
+This plugin is loaded into web processes from the context's
+web-extensions directory, which WebKit mounts read-only into the sandbox.
+It owns one isolated world per enabled extension, injects that extension's
+content scripts there, and gives the world (and the main world of
+chrome-extension://<id>/ pages) one read-only native function. The function
+takes a string and a reply callback, measures the string inside the web
+process and sends only messages within the limit to the browser, tagged
+with the extension of the world the plugin created. No script message
+handler exists.
+
+examples/channel_probe checks each of those claims in a sandboxed
+WebKitGTK view.
+---
+ Cargo.lock                                    |   9 +
+ crates/zephium-webext-process/Cargo.toml      |  17 ++
+ .../examples/channel_probe.rs                 | 171 ++++++++++++++++++
+ crates/zephium-webext-process/src/channel.rs  | 126 +++++++++++++
+ crates/zephium-webext-process/src/ffi.rs      |  97 ++++++++++
+ crates/zephium-webext-process/src/lib.rs      |  95 ++++++++++
+ crates/zephium-webext-process/src/matching.rs | 134 ++++++++++++++
+ crates/zephium-webext-process/src/worlds.rs   | 111 ++++++++++++
+ 8 files changed, 760 insertions(+)
+ create mode 100644 crates/zephium-webext-process/Cargo.toml
+ create mode 100644 crates/zephium-webext-process/examples/channel_probe.rs
+ create mode 100644 crates/zephium-webext-process/src/channel.rs
+ create mode 100644 crates/zephium-webext-process/src/ffi.rs
+ create mode 100644 crates/zephium-webext-process/src/lib.rs
+ create mode 100644 crates/zephium-webext-process/src/matching.rs
+ create mode 100644 crates/zephium-webext-process/src/worlds.rs
+
+diff --git a/Cargo.lock b/Cargo.lock
+index c3cd6234..316a166f 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -7907,6 +7907,15 @@ dependencies = [
+  "zephium-webext",
+ ]
+ 
++[[package]]
++name = "zephium-webext-process"
++version = "0.1.0"
++dependencies = [
++ "glib",
++ "gtk",
++ "webkit2gtk",
++]
++
+ [[package]]
+ name = "zephium-webext-windows"
+ version = "0.1.0"
+diff --git a/crates/zephium-webext-process/Cargo.toml b/crates/zephium-webext-process/Cargo.toml
+new file mode 100644
+index 00000000..d644e288
+--- /dev/null
++++ b/crates/zephium-webext-process/Cargo.toml
+@@ -0,0 +1,17 @@
++[package]
++name = "zephium-webext-process"
++version.workspace = true
++edition.workspace = true
++license.workspace = true
++description = "WebKitGTK web-process plugin: the only channel between extension code and Zephium on Linux"
++publish = false
++
++[lib]
++crate-type = ["cdylib", "rlib"]
++
++[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
++glib = "0.18"
++
++[target.'cfg(all(unix, not(target_os = "macos")))'.dev-dependencies]
++gtk = "0.18"
++webkit2gtk = { version = "=2.0.2", features = ["v2_40"] }
+diff --git a/crates/zephium-webext-process/examples/channel_probe.rs b/crates/zephium-webext-process/examples/channel_probe.rs
+new file mode 100644
+index 00000000..549b8e7a
+--- /dev/null
++++ b/crates/zephium-webext-process/examples/channel_probe.rs
+@@ -0,0 +1,171 @@
++//! End-to-end check of the extension channel in a real, sandboxed WebKitGTK.
++//!
++//!   channel_probe <directory holding only libzephium_webext_process.so>
++//!
++//! Needs a display (run it in the port's tools/rig). Prints one PASS or FAIL
++//! line per claim in docs/extensions.md and exits non-zero on any FAIL.
++
++#[cfg(not(all(unix, not(target_os = "macos"))))]
++fn main() {}
++
++#[cfg(all(unix, not(target_os = "macos")))]
++fn main() {
++    probe::run();
++}
++
++#[cfg(all(unix, not(target_os = "macos")))]
++mod probe {
++    use std::cell::RefCell;
++    use std::path::{Path, PathBuf};
++    use std::rc::Rc;
++    use std::time::{Duration, Instant};
++
++    use gtk::gio;
++    use gtk::glib::{self, ToVariant};
++    use gtk::prelude::*;
++    use webkit2gtk::{
++        SecurityManagerExt, URISchemeRequestExt, UserMessage, UserMessageExt, WebContext, WebContextExt,
++        WebView, WebViewExt,
++    };
++    use zephium_webext_process::{KIND_CONTENT, KIND_PAGE, SEND_MESSAGE};
++
++    const ENABLED: &str = "abcdefghijklmnopabcdefghijklmnop";
++    const DISABLED: &str = "ponmlkjihgfedcbaponmlkjihgfedcba";
++    const LIMIT: u32 = 64 * 1024;
++
++    const EXTENSION_PAGE: &str = r#"<!doctype html><script>
++        __zephiumWebextSend("from-page", answer => __zephiumWebextSend("page-got:" + answer, () => {}));
++    </script>"#;
++
++    const CONTENT_SCRIPT: &str = r#"(() => {
++        let big = "sent", wrong = "sent", kept = "kept";
++        try { __zephiumWebextSend("x".repeat(70000), () => {}); } catch (e) { big = "threw"; }
++        try { __zephiumWebextSend({}, () => {}); } catch (e) { wrong = "threw"; }
++        try { __zephiumWebextSend = null; } catch (e) {}
++        if (typeof __zephiumWebextSend !== "function") kept = "replaced";
++        const report = ["from-content", big, wrong, kept].join("|");
++        __zephiumWebextSend(report, answer => __zephiumWebextSend("content-got:" + answer, () => {}));
++    })();"#;
++
++    const WEB_PAGE: &str = r#"<!doctype html><title>t</title><script>
++        document.title = "pageworld:" + typeof window.__zephiumWebextSend;
++    </script>"#;
++
++    type Received = Rc<RefCell<Vec<(String, String, String)>>>;
++
++    pub fn run() {
++        let plugin_dir = std::env::args().nth(1).expect("usage: channel_probe <plugin directory>");
++        gtk::init().expect("a display (run inside tools/rig)");
++        let pages = write_pages();
++
++        let context = WebContext::new();
++        context.set_sandbox_enabled(true);
++        context.set_web_extensions_directory(&plugin_dir);
++        let init = (
++            LIMIT,
++            vec![(ENABLED.to_owned(), vec!["file:///*/content.html".to_owned()], vec![CONTENT_SCRIPT.to_owned()])],
++        )
++            .to_variant();
++        assert_eq!(init.type_().as_str(), zephium_webext_process::INIT_DATA_TYPE);
++        context.connect_initialize_web_extensions(move |context| {
++            context.set_web_extensions_initialization_user_data(&init);
++        });
++        context.register_uri_scheme("chrome-extension", |request| {
++            let bytes = glib::Bytes::from_static(EXTENSION_PAGE.as_bytes());
++            let stream = gio::MemoryInputStream::from_bytes(&bytes);
++            request.finish(&stream, bytes.len() as i64, Some("text/html"));
++        });
++        if let Some(security) = context.security_manager() {
++            security.register_uri_scheme_as_secure("chrome-extension");
++        }
++
++        let view = WebView::with_context(&context);
++        let received: Received = Rc::default();
++        let log = received.clone();
++        view.connect_user_message_received(move |_, message| {
++            if message.name().as_deref() != Some(SEND_MESSAGE) {
++                return false;
++            }
++            let Some((id, kind, _frame, body)) =
++                message.parameters().and_then(|p| p.get::<(String, String, u64, String)>())
++            else {
++                return false;
++            };
++            let answer = UserMessage::new("reply", Some(&(format!("ok:{body}"),).to_variant()));
++            message.send_reply(&answer);
++            log.borrow_mut().push((id, kind, body));
++            true
++        });
++        let window = gtk::Window::new(gtk::WindowType::Toplevel);
++        window.set_default_size(800, 600);
++        window.add(&view);
++        window.show_all();
++
++        let mut failures = 0;
++        let mut check = |claim: &str, ok: bool| {
++            println!("{} {claim}", if ok { "PASS" } else { "FAIL" });
++            failures += usize::from(!ok);
++        };
++
++        view.load_uri(&format!("chrome-extension://{ENABLED}/page.html"));
++        let page_ok = wait(|| has(&received, KIND_PAGE, "page-got:ok:from-page"));
++        check("an enabled extension's page sends and gets its reply", page_ok);
++
++        view.load_uri(&file_uri(&pages.join("content.html")));
++        let report = "from-content|threw|threw|kept";
++        let content_ok = wait(|| has(&received, KIND_CONTENT, &format!("content-got:ok:{report}")));
++        check("a matching page runs the content script, which sends and gets its reply", content_ok);
++        check("an oversized message is refused in the web process", has(&received, KIND_CONTENT, report));
++        check("a non-string message is refused", has(&received, KIND_CONTENT, report));
++        check("content-script code cannot replace the send function", has(&received, KIND_CONTENT, report));
++        let page_world = wait(|| view.title().as_deref() == Some("pageworld:undefined"));
++        check("the page's own scripts cannot see the send function", page_world);
++        check("every message carried the enabled extension's ID", received.borrow().iter().all(|(id, ..)| id == ENABLED));
++
++        let before = received.borrow().len();
++        view.load_uri(&file_uri(&pages.join("other.html")));
++        let quiet = !wait_for(Duration::from_millis(1500), || received.borrow().len() > before);
++        check("a page the patterns do not match gets no content script", quiet);
++
++        view.load_uri(&format!("chrome-extension://{DISABLED}/page.html"));
++        let quiet = !wait_for(Duration::from_millis(1500), || received.borrow().len() > before);
++        check("a disabled extension's page gets no channel", quiet);
++
++        std::process::exit(i32::from(failures > 0));
++    }
++
++    fn has(received: &Received, kind: &str, body: &str) -> bool {
++        received.borrow().iter().any(|(_, k, b)| k == kind && b == body)
++    }
++
++    fn wait(condition: impl Fn() -> bool) -> bool {
++        wait_for(Duration::from_secs(10), condition)
++    }
++
++    /// Run the main loop until `condition` holds or `limit` passes.
++    fn wait_for(limit: Duration, condition: impl Fn() -> bool) -> bool {
++        let start = Instant::now();
++        while start.elapsed() < limit {
++            while gtk::events_pending() {
++                gtk::main_iteration();
++            }
++            if condition() {
++                return true;
++            }
++            std::thread::sleep(Duration::from_millis(20));
++        }
++        condition()
++    }
++
++    fn write_pages() -> PathBuf {
++        let dir = std::env::temp_dir().join(format!("zephium-channel-probe-{}", std::process::id()));
++        std::fs::create_dir_all(&dir).expect("temporary directory");
++        std::fs::write(dir.join("content.html"), WEB_PAGE).expect("test page");
++        std::fs::write(dir.join("other.html"), WEB_PAGE).expect("test page");
++        dir
++    }
++
++    fn file_uri(path: &Path) -> String {
++        format!("file://{}", path.display())
++    }
++}
+diff --git a/crates/zephium-webext-process/src/channel.rs b/crates/zephium-webext-process/src/channel.rs
+new file mode 100644
+index 00000000..16b8faa1
+--- /dev/null
++++ b/crates/zephium-webext-process/src/channel.rs
+@@ -0,0 +1,126 @@
++//! The one native function an extension world gets: it sends a bounded
++//! string to the browser and hands the reply to a callback.
++//!
++//! The size is checked here, in the web process, so the browser never
++//! receives more than the limit. Measuring copies a string the caller already
++//! allocated in this same sandboxed process; nothing larger crosses into the
++//! browser.
++
++use std::ffi::{c_char, c_void, CStr, CString};
++
++use glib::gobject_ffi::{g_object_ref, g_object_unref};
++use glib::translate::{FromGlibPtrNone, ToGlibPtr};
++use glib::ToVariant;
++
++use crate::ffi::*;
++use crate::plugin::PLUGIN;
++use crate::{SEND_FUNCTION, SEND_MESSAGE};
++
++/// Who is sending, fixed by the plugin when it installs the function.
++pub(crate) struct Sender {
++    extension_id: String,
++    kind: &'static str,
++    page_id: u64,
++    frame_id: u64,
++}
++
++impl Sender {
++    pub(crate) fn new(extension_id: &str, kind: &'static str, page_id: u64, frame_id: u64) -> Self {
++        Self { extension_id: extension_id.to_owned(), kind, page_id, frame_id }
++    }
++}
++
++/// Define the send function on `context`'s global object, read-only and
++/// non-configurable, so code in the world can call it but not replace it.
++pub(crate) unsafe fn install(context: *mut JSCContext, sender: Sender) {
++    let name = CString::new(SEND_FUNCTION).expect("constant has no NUL");
++    let function = jsc_value_new_function_variadic(
++        context,
++        name.as_ptr(),
++        Some(std::mem::transmute::<unsafe extern "C" fn(*mut glib::ffi::GPtrArray, *mut c_void), unsafe extern "C" fn()>(
++            send,
++        )),
++        Box::into_raw(Box::new(sender)).cast(),
++        Some(drop_sender),
++        glib::gobject_ffi::G_TYPE_NONE,
++    );
++    let global = jsc_context_get_global_object(context);
++    jsc_value_object_define_property_data(global, name.as_ptr(), JSC_VALUE_PROPERTY_NONE, function);
++    g_object_unref(global.cast());
++    g_object_unref(function.cast());
++}
++
++unsafe extern "C" fn drop_sender(data: *mut c_void) {
++    drop(Box::from_raw(data.cast::<Sender>()));
++}
++
++/// `send(message: string, reply: (answer?: string) => void)`.
++unsafe extern "C" fn send(args: *mut glib::ffi::GPtrArray, data: *mut c_void) {
++    let sender = &*data.cast::<Sender>();
++    let [message, reply] = arguments(args) else {
++        return;
++    };
++    let context = jsc_value_get_context(*message);
++    if !ok(jsc_value_is_string(*message)) || !ok(jsc_value_is_function(*reply)) {
++        throw(context, c"send(message, reply) takes a string and a function");
++        return;
++    }
++    let Some(body) = owned_string(jsc_value_to_string(*message)) else {
++        throw(context, c"the message is not valid UTF-8");
++        return;
++    };
++    let (limit, extension) = PLUGIN.with(|plugin| {
++        plugin.borrow().as_ref().map_or((0, std::ptr::null_mut()), |plugin| (plugin.message_limit, plugin.extension))
++    });
++    if body.len() > limit {
++        throw(context, c"the message is larger than an extension may send");
++        return;
++    }
++    let page = webkit_web_extension_get_page(extension, sender.page_id);
++    if page.is_null() {
++        return;
++    }
++    let parameters = (sender.extension_id.as_str(), sender.kind, sender.frame_id, body.as_str()).to_variant();
++    let name = CString::new(SEND_MESSAGE).expect("constant has no NUL");
++    let message = webkit_user_message_new(name.as_ptr(), parameters.to_glib_none().0);
++    g_object_ref(reply.cast());
++    webkit_web_page_send_message_to_view(page, message, std::ptr::null_mut(), Some(replied), reply.cast());
++}
++
++unsafe extern "C" fn replied(page: *mut c_void, result: *mut GAsyncResult, data: *mut c_void) {
++    let reply: *mut JSCValue = data.cast();
++    let answer = webkit_web_page_send_message_to_view_finish(page, result, std::ptr::null_mut());
++    let text = (!answer.is_null())
++        .then(|| glib::Variant::from_glib_none(webkit_user_message_get_parameters(answer)))
++        .and_then(|parameters| parameters.get::<(String,)>())
++        .map(|(text,)| text);
++    let context = jsc_value_get_context(reply);
++    let mut arguments: Vec<*mut JSCValue> = Vec::new();
++    if let Some(text) = text.and_then(|text| CString::new(text).ok()) {
++        arguments.push(jsc_value_new_string(context, text.as_ptr()));
++    }
++    let returned = jsc_value_function_callv(reply, arguments.len() as u32, arguments.as_mut_ptr());
++    for argument in arguments {
++        g_object_unref(argument.cast());
++    }
++    if !returned.is_null() {
++        g_object_unref(returned.cast());
++    }
++    if !answer.is_null() {
++        g_object_unref(answer.cast());
++    }
++    g_object_unref(reply.cast());
++}
++
++unsafe fn throw(context: *mut JSCContext, message: &CStr) {
++    jsc_context_throw(context, message.as_ptr());
++}
++
++unsafe fn owned_string(raw: *mut c_char) -> Option<String> {
++    if raw.is_null() {
++        return None;
++    }
++    let text = CStr::from_ptr(raw).to_str().ok().map(str::to_owned);
++    glib::ffi::g_free(raw.cast());
++    text
++}
+diff --git a/crates/zephium-webext-process/src/ffi.rs b/crates/zephium-webext-process/src/ffi.rs
+new file mode 100644
+index 00000000..ba68533e
+--- /dev/null
++++ b/crates/zephium-webext-process/src/ffi.rs
+@@ -0,0 +1,97 @@
++//! The WebKitGTK 4.1 web-process API and the JavaScriptCore GLib API this
++//! plugin calls, declared from /usr/include/webkitgtk-4.1. WebKit objects are
++//! opaque here; only their pointers cross this boundary.
++
++use std::ffi::{c_char, c_int, c_uint, c_void};
++
++use glib::ffi::{gboolean, gpointer, GPtrArray, GVariant};
++use glib::gobject_ffi::GCallback;
++
++pub type WebKitWebExtension = c_void;
++pub type WebKitWebPage = c_void;
++pub type WebKitFrame = c_void;
++pub type WebKitScriptWorld = c_void;
++pub type WebKitUserMessage = c_void;
++pub type JSCContext = c_void;
++pub type JSCValue = c_void;
++pub type GAsyncResult = c_void;
++
++pub type GAsyncReadyCallback = Option<unsafe extern "C" fn(*mut c_void, *mut GAsyncResult, gpointer)>;
++
++pub const JSC_VALUE_PROPERTY_NONE: c_uint = 0;
++
++#[link(name = "webkit2gtk-4.1")]
++unsafe extern "C" {
++    pub fn webkit_web_extension_get_page(extension: *mut WebKitWebExtension, page_id: u64) -> *mut WebKitWebPage;
++
++    pub fn webkit_script_world_get_default() -> *mut WebKitScriptWorld;
++    pub fn webkit_script_world_new_with_name(name: *const c_char) -> *mut WebKitScriptWorld;
++
++    pub fn webkit_frame_get_id(frame: *mut WebKitFrame) -> u64;
++    pub fn webkit_frame_get_uri(frame: *mut WebKitFrame) -> *const c_char;
++    pub fn webkit_frame_get_js_context_for_script_world(
++        frame: *mut WebKitFrame,
++        world: *mut WebKitScriptWorld,
++    ) -> *mut JSCContext;
++
++    pub fn webkit_web_page_get_id(page: *mut WebKitWebPage) -> u64;
++    pub fn webkit_web_page_send_message_to_view(
++        page: *mut WebKitWebPage,
++        message: *mut WebKitUserMessage,
++        cancellable: *mut c_void,
++        callback: GAsyncReadyCallback,
++        user_data: gpointer,
++    );
++    pub fn webkit_web_page_send_message_to_view_finish(
++        page: *mut WebKitWebPage,
++        result: *mut GAsyncResult,
++        error: *mut *mut glib::ffi::GError,
++    ) -> *mut WebKitUserMessage;
++
++    pub fn webkit_user_message_new(name: *const c_char, parameters: *mut GVariant) -> *mut WebKitUserMessage;
++    pub fn webkit_user_message_get_parameters(message: *mut WebKitUserMessage) -> *mut GVariant;
++}
++
++#[link(name = "javascriptcoregtk-4.1")]
++unsafe extern "C" {
++    pub fn jsc_context_get_global_object(context: *mut JSCContext) -> *mut JSCValue;
++    pub fn jsc_context_throw(context: *mut JSCContext, error_message: *const c_char);
++    pub fn jsc_context_evaluate(context: *mut JSCContext, code: *const c_char, length: isize) -> *mut JSCValue;
++
++    pub fn jsc_value_get_context(value: *mut JSCValue) -> *mut JSCContext;
++    pub fn jsc_value_is_string(value: *mut JSCValue) -> gboolean;
++    pub fn jsc_value_is_function(value: *mut JSCValue) -> gboolean;
++    pub fn jsc_value_to_string(value: *mut JSCValue) -> *mut c_char;
++    pub fn jsc_value_new_string(context: *mut JSCContext, string: *const c_char) -> *mut JSCValue;
++    pub fn jsc_value_new_function_variadic(
++        context: *mut JSCContext,
++        name: *const c_char,
++        callback: GCallback,
++        user_data: gpointer,
++        destroy_notify: glib::ffi::GDestroyNotify,
++        return_type: glib::ffi::GType,
++    ) -> *mut JSCValue;
++    pub fn jsc_value_function_callv(
++        value: *mut JSCValue,
++        n_parameters: c_uint,
++        parameters: *mut *mut JSCValue,
++    ) -> *mut JSCValue;
++    pub fn jsc_value_object_define_property_data(
++        value: *mut JSCValue,
++        property_name: *const c_char,
++        flags: c_uint,
++        property_value: *mut JSCValue,
++    );
++}
++
++/// The arguments a variadic JavaScriptCore function receives.
++pub unsafe fn arguments(args: *mut GPtrArray) -> &'static [*mut JSCValue] {
++    if args.is_null() || (*args).len == 0 {
++        return &[];
++    }
++    std::slice::from_raw_parts((*args).pdata.cast::<*mut JSCValue>(), (*args).len as usize)
++}
++
++pub fn ok(value: c_int) -> bool {
++    value != 0
++}
+diff --git a/crates/zephium-webext-process/src/lib.rs b/crates/zephium-webext-process/src/lib.rs
+new file mode 100644
+index 00000000..d1ed55ce
+--- /dev/null
++++ b/crates/zephium-webext-process/src/lib.rs
+@@ -0,0 +1,95 @@
++//! Zephium's WebKitGTK web-process plugin, the only channel between extension
++//! code and the browser on Linux.
++//!
++//! WebKitGTK loads it into every web process from the directory the browser
++//! passes to `webkit_web_context_set_web_extensions_directory`. It owns one
++//! isolated script world per enabled extension, injects that extension's
++//! content scripts there, and gives each extension world (and the main world
++//! of `chrome-extension://<id>/` pages) one native function that sends a
++//! bounded string to the browser. No script message handler exists, so there
++//! is no raw handler to call around it. The reasoning is in the port's
++//! docs/extensions.md.
++
++#[cfg(all(unix, not(target_os = "macos")))]
++mod channel;
++#[cfg(all(unix, not(target_os = "macos")))]
++mod ffi;
++pub mod matching;
++#[cfg(all(unix, not(target_os = "macos")))]
++mod worlds;
++
++/// Name of the message a world sends to the browser. Parameters `(ssts)`:
++/// extension ID, sender kind, frame ID, body. The reply's parameters are `(s)`.
++pub const SEND_MESSAGE: &str = "zephium-webext.send";
++/// Sender kind of a content script's isolated world.
++pub const KIND_CONTENT: &str = "content";
++/// Sender kind of an extension's own page (background, popup, options).
++pub const KIND_PAGE: &str = "page";
++/// The global, in each extension world, through which messages leave it.
++pub const SEND_FUNCTION: &str = "__zephiumWebextSend";
++/// Initialization data type: the per-message byte limit, then for each
++/// enabled extension its ID, content-script match patterns and scripts.
++pub const INIT_DATA_TYPE: &str = "(ua(sasas))";
++
++#[cfg(all(unix, not(target_os = "macos")))]
++mod plugin {
++    use std::cell::RefCell;
++    use std::collections::HashMap;
++
++    use glib::translate::FromGlibPtrNone;
++
++    use crate::ffi::WebKitWebExtension;
++    use crate::{worlds, INIT_DATA_TYPE};
++
++    /// What the browser enabled for this web process at its start.
++    pub(crate) struct Plugin {
++        pub(crate) extension: *mut WebKitWebExtension,
++        pub(crate) message_limit: usize,
++        pub(crate) extensions: HashMap<String, Extension>,
++    }
++
++    pub(crate) struct Extension {
++        pub(crate) matches: Vec<String>,
++        pub(crate) scripts: Vec<String>,
++        pub(crate) world: worlds::World,
++    }
++
++    thread_local! {
++        pub(crate) static PLUGIN: RefCell<Option<Plugin>> = const { RefCell::new(None) };
++    }
++
++    /// Entry point WebKitGTK calls once per web process.
++    #[no_mangle]
++    pub unsafe extern "C" fn webkit_web_extension_initialize_with_user_data(
++        extension: *mut WebKitWebExtension,
++        user_data: *const glib::ffi::GVariant,
++    ) {
++        if user_data.is_null() {
++            return;
++        }
++        let data = glib::Variant::from_glib_none(user_data);
++        if data.type_().as_str() != INIT_DATA_TYPE {
++            return;
++        }
++        let Some((limit, enabled)) = data.get::<(u32, Vec<(String, Vec<String>, Vec<String>)>)>() else {
++            return;
++        };
++        let extensions = enabled
++            .into_iter()
++            .filter(|(id, _, _)| is_extension_id(id))
++            .map(|(id, matches, scripts)| {
++                let world = worlds::World::new(&id);
++                (id, Extension { matches, scripts, world })
++            })
++            .collect();
++        PLUGIN.with(|plugin| {
++            *plugin.borrow_mut() = Some(Plugin { extension, message_limit: limit as usize, extensions });
++        });
++        worlds::watch_main_world();
++    }
++
++    /// Chrome extension IDs: 32 letters from `a` to `p`.
++    pub(crate) fn is_extension_id(id: &str) -> bool {
++        id.len() == 32 && id.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
++    }
++}
+diff --git a/crates/zephium-webext-process/src/matching.rs b/crates/zephium-webext-process/src/matching.rs
+new file mode 100644
+index 00000000..952c73dd
+--- /dev/null
++++ b/crates/zephium-webext-process/src/matching.rs
+@@ -0,0 +1,134 @@
++//! Chrome match patterns (`<scheme>://<host>/<path>`, `<all_urls>`), as
++//! content scripts use them to pick the documents they run in.
++
++/// Whether `url` is matched by any of `patterns`.
++pub fn any_matches(patterns: &[String], url: &str) -> bool {
++    let Some(target) = Target::parse(url) else {
++        return false;
++    };
++    patterns.iter().any(|pattern| matches(pattern, &target))
++}
++
++struct Target<'a> {
++    scheme: &'a str,
++    host: &'a str,
++    path: &'a str,
++}
++
++impl<'a> Target<'a> {
++    fn parse(url: &'a str) -> Option<Self> {
++        let (scheme, rest) = url.split_once("://")?;
++        let (authority, path) = match rest.find('/') {
++            Some(slash) => (&rest[..slash], &rest[slash..]),
++            None => (rest, "/"),
++        };
++        // Drop credentials and the port; patterns match the host name only.
++        let host = authority.rsplit('@').next().unwrap_or(authority);
++        let host = match host.rfind(':') {
++            Some(colon) if !host.ends_with(']') => &host[..colon],
++            _ => host,
++        };
++        Some(Self { scheme, host, path })
++    }
++}
++
++const WEB_SCHEMES: [&str; 2] = ["http", "https"];
++const ALL_URLS_SCHEMES: [&str; 5] = ["http", "https", "file", "ws", "wss"];
++
++fn matches(pattern: &str, target: &Target) -> bool {
++    if pattern == "<all_urls>" {
++        return ALL_URLS_SCHEMES.contains(&target.scheme);
++    }
++    let Some((scheme, rest)) = pattern.split_once("://") else {
++        return false;
++    };
++    let scheme_matches = match scheme {
++        "*" => WEB_SCHEMES.contains(&target.scheme),
++        _ => scheme == target.scheme,
++    };
++    if !scheme_matches {
++        return false;
++    }
++    let (host, path) = match rest.find('/') {
++        Some(slash) => (&rest[..slash], &rest[slash..]),
++        None => return false,
++    };
++    host_matches(host, target.host) && glob(path, target.path)
++}
++
++fn host_matches(pattern: &str, host: &str) -> bool {
++    match pattern {
++        "*" => true,
++        _ => match pattern.strip_prefix("*.") {
++            Some(domain) => host == domain || host.ends_with(&format!(".{domain}")),
++            None => pattern == host,
++        },
++    }
++}
++
++/// `*` matches any run of characters; everything else matches itself.
++fn glob(pattern: &str, text: &str) -> bool {
++    let (pattern, text) = (pattern.as_bytes(), text.as_bytes());
++    let (mut p, mut t) = (0, 0);
++    let mut star: Option<(usize, usize)> = None;
++    while t < text.len() {
++        if p < pattern.len() && pattern[p] == b'*' {
++            star = Some((p, t));
++            p += 1;
++        } else if p < pattern.len() && pattern[p] == text[t] {
++            p += 1;
++            t += 1;
++        } else if let Some((star_p, star_t)) = star {
++            p = star_p + 1;
++            t = star_t + 1;
++            star = Some((star_p, star_t + 1));
++        } else {
++            return false;
++        }
++    }
++    pattern[p..].iter().all(|&byte| byte == b'*')
++}
++
++#[cfg(test)]
++mod tests {
++    use super::any_matches;
++
++    fn yes(pattern: &str, url: &str) -> bool {
++        any_matches(&[pattern.to_owned()], url)
++    }
++
++    #[test]
++    fn all_urls_covers_web_and_files_but_not_internal_schemes() {
++        assert!(yes("<all_urls>", "https://example.com/"));
++        assert!(yes("<all_urls>", "file:///home/a.html"));
++        assert!(!yes("<all_urls>", "chrome-extension://abcdefghijklmnopabcdefghijklmnop/a.html"));
++        assert!(!yes("<all_urls>", "about:blank"));
++    }
++
++    #[test]
++    fn star_scheme_is_http_and_https_only() {
++        assert!(yes("*://*/*", "http://a.test/x"));
++        assert!(yes("*://*/*", "https://a.test/x"));
++        assert!(!yes("*://*/*", "file:///x"));
++    }
++
++    #[test]
++    fn subdomain_wildcards_include_the_domain_itself() {
++        assert!(yes("https://*.example.com/*", "https://example.com/"));
++        assert!(yes("https://*.example.com/*", "https://a.b.example.com/p"));
++        assert!(!yes("https://*.example.com/*", "https://badexample.com/"));
++    }
++
++    #[test]
++    fn ports_and_credentials_do_not_change_the_host() {
++        assert!(yes("https://example.com/*", "https://user:pw@example.com:8443/x"));
++        assert!(!yes("https://example.com/*", "https://example.com.evil.test/x"));
++    }
++
++    #[test]
++    fn paths_are_globs() {
++        assert!(yes("https://a.test/docs/*", "https://a.test/docs/x/y?q=1"));
++        assert!(!yes("https://a.test/docs/*", "https://a.test/blog/"));
++        assert!(yes("https://a.test/*.pdf", "https://a.test/a/b.pdf"));
++    }
++}
+diff --git a/crates/zephium-webext-process/src/worlds.rs b/crates/zephium-webext-process/src/worlds.rs
+new file mode 100644
+index 00000000..16af702d
+--- /dev/null
++++ b/crates/zephium-webext-process/src/worlds.rs
+@@ -0,0 +1,111 @@
++//! Extension worlds and what runs in them.
++//!
++//! WebKit only reports `window-object-cleared` for worlds already used in a
++//! frame, and a frame's main world is always used. So the main world's signal
++//! drives everything: when a frame gets a new document, the plugin gives an
++//! extension page its channel, or creates the matching extensions' worlds in
++//! that frame and injects their content scripts.
++
++use std::ffi::{c_void, CStr, CString};
++
++use glib::gobject_ffi::{g_object_unref, g_signal_connect_data};
++
++use crate::channel::{self, Sender};
++use crate::ffi::*;
++use crate::matching::any_matches;
++use crate::plugin::{is_extension_id, PLUGIN};
++use crate::{KIND_CONTENT, KIND_PAGE};
++
++const EXTENSION_SCHEME: &str = "chrome-extension://";
++
++/// One extension's isolated world, alive as long as the web process.
++pub(crate) struct World {
++    raw: *mut WebKitScriptWorld,
++}
++
++impl World {
++    pub(crate) fn new(extension_id: &str) -> Self {
++        let name = CString::new(format!("zephium-extension-{extension_id}")).expect("ID has no NUL");
++        Self { raw: unsafe { webkit_script_world_new_with_name(name.as_ptr()) } }
++    }
++}
++
++pub(crate) fn watch_main_world() {
++    unsafe {
++        g_signal_connect_data(
++            webkit_script_world_get_default().cast(),
++            c"window-object-cleared".as_ptr(),
++            Some(std::mem::transmute::<
++                unsafe extern "C" fn(*mut WebKitScriptWorld, *mut WebKitWebPage, *mut WebKitFrame, *mut c_void),
++                unsafe extern "C" fn(),
++            >(main_world_cleared)),
++            std::ptr::null_mut(),
++            None,
++            0,
++        );
++    }
++}
++
++unsafe extern "C" fn main_world_cleared(
++    main_world: *mut WebKitScriptWorld,
++    page: *mut WebKitWebPage,
++    frame: *mut WebKitFrame,
++    _data: *mut c_void,
++) {
++    let uri = webkit_frame_get_uri(frame);
++    if uri.is_null() {
++        return;
++    }
++    let Ok(uri) = CStr::from_ptr(uri).to_str() else {
++        return;
++    };
++    let page_id = webkit_web_page_get_id(page);
++    let frame_id = webkit_frame_get_id(frame);
++    if let Some(rest) = uri.strip_prefix(EXTENSION_SCHEME) {
++        let host = rest.split('/').next().unwrap_or_default();
++        if is_extension_id(host) && enabled(host) {
++            let sender = Sender::new(host, KIND_PAGE, page_id, frame_id);
++            prepare(frame, main_world, sender, &[]);
++        }
++        return;
++    }
++    // Copied out first: a content script may call back into the plugin.
++    let matching: Vec<(String, *mut WebKitScriptWorld, Vec<String>)> = PLUGIN.with(|plugin| {
++        let plugin = plugin.borrow();
++        let Some(plugin) = plugin.as_ref() else {
++            return Vec::new();
++        };
++        plugin
++            .extensions
++            .iter()
++            .filter(|(_, extension)| !extension.scripts.is_empty() && any_matches(&extension.matches, uri))
++            .map(|(id, extension)| (id.clone(), extension.world.raw, extension.scripts.clone()))
++            .collect()
++    });
++    for (id, world, scripts) in matching {
++        let sender = Sender::new(&id, KIND_CONTENT, page_id, frame_id);
++        prepare(frame, world, sender, &scripts);
++    }
++}
++
++fn enabled(extension_id: &str) -> bool {
++    PLUGIN.with(|plugin| {
++        plugin.borrow().as_ref().is_some_and(|plugin| plugin.extensions.contains_key(extension_id))
++    })
++}
++
++/// Give `world` in `frame` its channel, then run `scripts` there.
++unsafe fn prepare(frame: *mut WebKitFrame, world: *mut WebKitScriptWorld, sender: Sender, scripts: &[String]) {
++    let context = webkit_frame_get_js_context_for_script_world(frame, world);
++    if context.is_null() {
++        return;
++    }
++    channel::install(context, sender);
++    for script in scripts {
++        let result = jsc_context_evaluate(context, script.as_ptr().cast(), script.len() as isize);
++        if !result.is_null() {
++            g_object_unref(result.cast());
++        }
++    }
++    g_object_unref(context.cast());
++}
