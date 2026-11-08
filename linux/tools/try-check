@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Runs the fork's build of a check-* tag in a private rig, never the installed
+# Zephium: its own scratch profile, runtime directory and session bus.
+#
+#   tools/try-check NAME     start the build of the tag check-NAME
+#   tools/try-check --down   stop that rig
+#
+# The .deb is the run's artifact, checked against the digest GitHub recorded
+# (the updater's own ci.download). Nothing is compiled here.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$(readlink -f "$0")")" && pwd)
+PROJECT=$(dirname "$HERE")
+export RIG_RUN=/tmp/zr-try
+if [ "${1:-}" = "--down" ]; then
+    "$HERE/rig" down
+    exit 0
+fi
+NAME=${1:?usage: try-check NAME | --down}
+SCRATCH=/tmp/zephium-try-$NAME
+export RIG_SCRATCH=$SCRATCH/profile
+
+if [ ! -x "$SCRATCH/root/usr/bin/zephium-desktop" ]; then
+    mkdir -p "$SCRATCH/root"
+    # Isolated (-I) ignores PYTHONPATH, so the updater's path comes in as an argument.
+    python3 -I - "$PROJECT/updater" "$NAME" "$SCRATCH" <<'EOF'
+import json, subprocess, sys
+sys.path.insert(0, sys.argv[1])
+from pathlib import Path
+from zephium_linux import ci
+from zephium_linux.config import load_settings
+from zephium_linux.log import Log
+
+name, scratch = sys.argv[2], Path(sys.argv[3])
+repo = load_settings().publish_repo
+log = Log(scratch / "download.log")
+runs = json.loads(log.run(["gh", "api", f"repos/{repo}/actions/workflows/{ci.WORKFLOW}/runs?branch=check-{name}&status=success&per_page=1"], capture=True))["workflow_runs"]
+if not runs:
+    sys.exit(f"no passing run for check-{name}")
+artifact = ci._artifact(repo, runs[0]["id"], log)
+if artifact is None:
+    sys.exit(f"the run for check-{name} kept no .deb")
+build = ci.Build(runs[0]["id"], runs[0]["head_sha"], artifact["id"], artifact["digest"])
+deb = ci.download(repo, build, scratch, log)
+subprocess.run(["bsdtar", "-xf", str(deb), "-C", str(scratch)], check=True)
+subprocess.run(["bsdtar", "-xf", str(next(scratch.glob("data.tar*"))), "-C", str(scratch / "root")], check=True)
+print(f"check-{name}: run {build.run_id}, {deb.name}, digest matched")
+EOF
+fi
+"$HERE/rig" up
+"$HERE/rig" zephium "$SCRATCH/root/usr/bin/zephium-desktop"
+echo "running in the private rig; tools/rig shot FILE with RIG_RUN=$RIG_RUN, then tools/try-check --down"
