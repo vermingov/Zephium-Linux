@@ -1,0 +1,45 @@
+{
+  "manifest_version": 3,
+  "name": "Zephium Probe",
+  "version": "1.0",
+  "description": "Checks the Linux runtime: messaging, storage, badge, popup.",
+  "permissions": [
+    "activeTab",
+    "declarativeNetRequest",
+    "scripting",
+    "storage"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Zephium Probe"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "content.js"
+      ],
+      "css": [
+        "content.css"
+      ],
+      "run_at": "document_end"
+    }
+  ],
+  "declarative_net_request": {
+    "rule_resources": [
+      {
+        "id": "probe",
+        "enabled": true,
+        "path": "rules.json"
+      }
+    ]
+  }
+}
