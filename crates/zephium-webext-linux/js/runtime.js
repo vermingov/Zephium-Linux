@@ -436,6 +436,23 @@
         }),
       }, ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]),
     });
+    // Firefox's contentScripts.register, over scripting's registrations: the
+    // promise gives an object that unregisters them. Files only.
+    chrome.contentScripts = {
+      register: async (options) => {
+        const files = (list) => (list || []).map((entry) => entry.file).filter(Boolean);
+        if ((options.js || []).some((entry) => !entry.file) || (options.css || []).some((entry) => !entry.file)) {
+          throw new Error("contentScripts.register takes files only on Linux.");
+        }
+        const id = `zephium-registered-${Date.now()}-${nextRequest}`;
+        await request("scripting.registerContentScripts", [[{
+          id, matches: options.matches, excludeMatches: options.excludeMatches,
+          js: files(options.js), css: files(options.css),
+          runAt: options.runAt, allFrames: options.allFrames, persistAcrossSessions: false,
+        }]]);
+        return { unregister: () => request("scripting.unregisterContentScripts", [{ ids: [id] }]) };
+      },
+    };
     // Firefox's name for contextMenus.
     chrome.menus = chrome.contextMenus;
     // An item's own onclick, which cannot travel to the browser, runs here.
