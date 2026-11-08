@@ -1,5 +1,5 @@
 //! Toolbar actions: what each extension's button shows, and what clicking it
-//! does, opening its popup window or raising `action.onClicked`.
+//! does, opening its popup or raising `action.onClicked`.
 
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
@@ -126,17 +126,19 @@ fn icon_from_file(path: &Path) -> Option<ExtensionActionIcon> {
     ExtensionActionIcon::from_rgba(rgba).ok()
 }
 
-/// An open popup: the extension's popup page in a small window of its own.
-/// Upstream's Linux stage keeps its overlays out of the browser window's
-/// widget tree the same way; a popover inside it took the page views down.
+/// An open popup: the extension's popup page in the browser window, above
+/// the tab pages and under its button, as Chrome shows it. A view of its own
+/// on the stage's layer, not a popover or a window: a popover took the page
+/// views down, and a window is the compositor's to place and focus.
 pub(super) struct Popup {
     pub(super) view: WebView,
-    window: gtk::Window,
+    frame: gtk::Frame,
+    parent: gtk::Fixed,
 }
 
 impl Popup {
     pub(super) fn close(self) {
-        self.window.close();
+        self.parent.remove(&self.frame);
         self.view.try_close();
     }
 }
@@ -272,7 +274,7 @@ impl super::super::EngineHost {
                 }
                 let url = format!("{}{}", install.origin(), popup);
                 let rect = request.anchor().rect();
-                install.popup = Some(open_popup(&context, channel, &parent, &url, rect, profile, install.extension_id.clone(), &install.loaded.name));
+                install.popup = Some(open_popup(&context, channel, &parent, &url, rect, profile, install.extension_id.clone()));
                 ExtensionActionSettlement::PopupPresented(Size { width: f64::from(POPUP_SIZE.0), height: f64::from(POPUP_SIZE.1) })
             }
             None => {
@@ -290,7 +292,7 @@ impl super::super::EngineHost {
         tabs.into_iter().find(|candidate| number.is_some_and(|number| candidate["id"] == number)).unwrap_or(Value::Null)
     }
 
-    /// The popup window closed itself (focus left it, or the page closed it).
+    /// The popup closed itself (focus left it, Escape, or the page closed it).
     fn linux_popup_closed(&mut self, profile: ProfileId, extension_id: &str, view: &WebView) {
         if let Some(install) = self.linux_extensions.profiles.get_mut(&profile).and_then(|state| state.install_mut(extension_id)) {
             if install.popup.as_ref().is_some_and(|popup| &popup.view == view) {
@@ -310,7 +312,6 @@ fn open_popup(
     anchor: zephium_core::geometry::Rect,
     profile: ProfileId,
     extension_id: String,
-    title: &str,
 ) -> Popup {
     let view = WebView::with_context(context);
     // Popups are small; software rendering keeps them off the GPU paths
@@ -326,84 +327,91 @@ fn open_popup(
     view.set_background_color(&gtk::gdk::RGBA::new(1.0, 1.0, 1.0, 1.0));
     extension_channel::listen(&view, channel);
 
-    // A toplevel, not a popup-type window: popup windows get no keyboard on
-    // Wayland, and extension popups take typing (passwords, search).
-    let window = gtk::Window::new(gtk::WindowType::Toplevel);
-    window.set_decorated(false);
-    window.set_type_hint(gtk::gdk::WindowTypeHint::Dialog);
-    window.set_skip_taskbar_hint(true);
-    window.set_skip_pager_hint(true);
-    window.set_title(title);
-    window.set_default_size(POPUP_SIZE.0, POPUP_SIZE.1);
-    if let Some(top) = parent.toplevel().and_then(|top| top.downcast::<gtk::Window>().ok()) {
-        window.set_transient_for(Some(&top));
-        window.set_destroy_with_parent(true);
-    }
-    // Under the button where the platform lets a window choose its place
-    // (X11); Wayland compositors place transient dialogs themselves.
-    if let Some((x, y)) = parent.window().map(|surface| {
-        let (_, x, y) = surface.origin();
-        (x, y)
-    }) {
-        window.move_(x + anchor.x as i32, y + (anchor.y + anchor.height) as i32);
-    }
-    window.add(&view);
+    // A thin edge, so the popup reads apart from the page under it.
+    let frame = gtk::Frame::new(None);
+    frame.set_shadow_type(gtk::ShadowType::In);
+    frame.add(&view);
+    view.set_size_request(POPUP_SIZE.0, POPUP_SIZE.1);
+    let (x, y) = popup_place(parent, anchor, POPUP_SIZE);
+    // Added last, it draws above the tab pages.
+    parent.put(&frame, x, y);
 
-    // Chrome closes a popup when it loses focus. Only after it had focus
-    // once: it can be told it lost focus before it was shown.
+    // Chrome closes a popup when it loses focus, and on Escape. Only after
+    // it had focus once: it can be told it lost focus before it was shown.
+    let dismiss = {
+        let (view, extension_id) = (view.clone(), extension_id);
+        move || {
+            let (view, extension_id) = (view.clone(), extension_id.clone());
+            super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
+        }
+    };
     let focused = std::rc::Rc::new(std::cell::Cell::new(false));
     let had_focus = focused.clone();
-    window.connect_focus_in_event(move |_, _| {
+    view.connect_focus_in_event(move |_, _| {
         had_focus.set(true);
         gtk::glib::Propagation::Proceed
     });
-    window.connect_key_press_event(|window, event| {
+    let on_focus_out = dismiss.clone();
+    view.connect_focus_out_event(move |_, _| {
+        if focused.get() {
+            on_focus_out();
+        }
+        gtk::glib::Propagation::Proceed
+    });
+    let on_escape = dismiss.clone();
+    view.connect_key_press_event(move |_, event| {
         if event.keyval() == gtk::gdk::keys::constants::Escape {
-            window.close();
+            on_escape();
             return gtk::glib::Propagation::Stop;
         }
         gtk::glib::Propagation::Proceed
     });
-    window.connect_focus_out_event(move |window, _| {
-        if focused.get() {
-            window.close();
-        }
-        gtk::glib::Propagation::Proceed
-    });
-    let page_window = window.clone();
-    view.connect_close(move |_| page_window.close());
-    let (closed_view, closed_extension) = (view.clone(), extension_id);
-    window.connect_destroy(move |_| {
-        let (view, extension_id) = (closed_view.clone(), closed_extension.clone());
-        super::super::dispatch::best_effort_with(move |host| host.linux_popup_closed(profile, &extension_id, &view));
-    });
+    view.connect_close(move |_| dismiss());
 
-    // Once loaded, the window takes the page's own size, and again once
-    // the page's script has drawn what it shows.
-    let sized_window = window.clone();
+    // Once loaded, the popup takes the page's own size, and again once the
+    // page's script has drawn what it shows.
+    let (sized_parent, sized_frame) = (parent.clone(), frame.clone());
     view.connect_load_changed(move |view, event| {
         if event != webkit2gtk::LoadEvent::Finished {
             return;
         }
         for delay in [0, 250, 1000] {
-            let (view, window) = (view.clone(), sized_window.clone());
-            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || fit_popup(&view, window));
+            let (view, parent, frame) = (view.clone(), sized_parent.clone(), sized_frame.clone());
+            gtk::glib::timeout_add_local_once(std::time::Duration::from_millis(delay), move || {
+                fit_popup(&view, parent, frame, anchor);
+            });
         }
     });
 
     view.load_uri(url);
-    window.show_all();
-    window.present();
-    Popup { view, window }
+    frame.show_all();
+    view.grab_focus();
+    Popup { view, frame, parent: parent.clone() }
 }
 
-/// Size `window` to its page.
-fn fit_popup(view: &WebView, window: gtk::Window) {
+/// Size the popup to its page, keeping it under its button and inside the
+/// window.
+fn fit_popup(view: &WebView, parent: gtk::Fixed, frame: gtk::Frame, anchor: zephium_core::geometry::Rect) {
+    let sized = view.clone();
     view.evaluate_javascript(MEASURE_POPUP, None, None, None::<&gtk::gio::Cancellable>, move |result| {
-        if let Some((width, height)) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
-            window.resize(width, height);
+        if let Some(size) = result.ok().and_then(|value| js_string(&value)).as_deref().and_then(popup_size) {
+            sized.set_size_request(size.0, size.1);
+            let (x, y) = popup_place(&parent, anchor, size);
+            parent.move_(&frame, x, y);
         }
     });
+}
+
+/// Where a popup of `size` goes: under its button, moved in as far as it
+/// takes to stay inside the window.
+fn popup_place(parent: &gtk::Fixed, anchor: zephium_core::geometry::Rect, size: (i32, i32)) -> (i32, i32) {
+    const MARGIN: i32 = 4;
+    let room = parent.allocation();
+    let fit = |start: i32, length: i32, available: i32| start.min(available - length - MARGIN).max(0);
+    (
+        fit(anchor.x as i32, size.0, room.width()),
+        fit((anchor.y + anchor.height) as i32 + MARGIN, size.1, room.height()),
+    )
 }
 
 /// `"width,height"` as the popup's size within Chrome's bounds.

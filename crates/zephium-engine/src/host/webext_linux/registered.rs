@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use zephium_core::ids::ProfileId;
 use zephium_webext_linux::content::{self, Group};
 
@@ -153,6 +153,8 @@ impl super::super::EngineHost {
 
 #[cfg(test)]
 mod tests {
+    use serde_json::json;
+
     use super::*;
 
     fn package() -> tempfile::TempDir {
