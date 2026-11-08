@@ -6,6 +6,7 @@ mod amo_button;
 mod content_filter;
 pub(crate) mod extension_channel;
 mod find;
+mod frame_documents;
 mod fullscreen;
 mod web_features;
 mod stage;
@@ -443,6 +444,7 @@ pub fn configure(
         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
     }
     web_features::enable(&view);
+    frame_documents::keep_out_of_main_frame(&view);
     // Private profiles run no extensions, so they take no add-on either.
     if !expected_ephemeral {
         addon_download::offer_for_review(&view, partition.profile());
