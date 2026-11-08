@@ -29,8 +29,14 @@ pub(crate) const MESSAGE_LIMIT: usize = 64 * 1_024;
 const CHANNEL_KEY: &str = "zephium-extension-channel";
 
 /// The runtime's step-by-step log (see host::webext_linux's `trace!`).
+/// Whether `ZEPHIUM_WEBEXT_TRACE` is set, read once: tracing sits on hot paths.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some())
+}
+
 fn trace(line: std::fmt::Arguments) {
-    if std::env::var_os("ZEPHIUM_WEBEXT_TRACE").is_some() {
+    if tracing() {
         eprintln!("webext: {line}");
     }
 }
@@ -91,6 +97,9 @@ impl Drop for Message {
 #[derive(Default)]
 pub(crate) struct Channel {
     extensions: RefCell<Vec<ChannelExtension>>,
+    /// `extensions` as the plugin takes them, built once per change: every
+    /// new page asks for it.
+    data: RefCell<Option<gtk::glib::Variant>>,
     handler: RefCell<Option<Handler>>,
 }
 
@@ -98,6 +107,7 @@ impl Channel {
     /// Web processes started from now on get `extensions`.
     pub(crate) fn set_extensions(&self, extensions: Vec<ChannelExtension>) {
         *self.extensions.borrow_mut() = extensions;
+        self.data.take();
     }
 
     pub(crate) fn set_handler(&self, handler: impl Fn(Message) + 'static) {
@@ -106,10 +116,14 @@ impl Channel {
 
     /// The enabled extensions as the plugin takes them, at startup or later.
     pub(crate) fn current_data(&self) -> gtk::glib::Variant {
+        if let Some(data) = self.data.borrow().as_ref() {
+            return data.clone();
+        }
         let extensions: Vec<zephium_webext_process::InitExtension> =
             self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
         let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
+        *self.data.borrow_mut() = Some(data.clone());
         data
     }
 
