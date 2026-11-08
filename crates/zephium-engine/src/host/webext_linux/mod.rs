@@ -9,10 +9,14 @@
 
 mod action;
 mod api;
+mod browser_data;
 mod capture;
+mod commands;
+mod cookies;
 mod dnr;
 mod downloads;
 mod events;
+mod menus;
 mod registered;
 mod routing;
 mod scheme;
@@ -50,6 +54,8 @@ pub(super) struct LinuxExtensions {
     navigation: HashMap<ProfileId, super::permits::ExtensionNavigationGrants>,
     /// Numbers the tab and window requests this runtime raises.
     next_request: u64,
+    /// History, bookmark and session requests waiting for the shell.
+    data: browser_data::Pending,
 }
 
 impl LinuxExtensions {
@@ -72,8 +78,12 @@ pub(super) struct ProfileExtensions {
     packages: scheme::Packages,
     installs: HashMap<ExtensionInstallId, Install>,
     routing: routing::Routing,
-    /// The browser window that last had focus: a popup, in a window of its
-    /// own, still belongs to it, as Chrome's "current window".
+    /// The installed extensions' keyboard commands and menu items, read by
+    /// each tab.
+    shortcuts: commands::Shortcuts,
+    menus: menus::MenuTable,
+    /// The browser window that last had focus, Chrome's "current window"
+    /// for a popup while the popup has the keyboard.
     last_focused: Option<zephium_core::ids::WindowId>,
 }
 
@@ -106,6 +116,7 @@ pub(super) struct Install {
     manifest_groups: Vec<zephium_webext_linux::content::Group>,
     pub(super) registered: registered::Registered,
     pub(super) downloads: downloads::Downloads,
+    pub(super) menus: menus::Menus,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -173,6 +184,7 @@ impl Install {
             manifest_groups,
             registered: registered::Registered::open(storage.as_deref()),
             downloads: downloads::Downloads::default(),
+            menus: menus::Menus::default(),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
@@ -269,6 +281,10 @@ impl super::EngineHost {
             }
             state.context = Some(context);
         }
+        if let Some(state) = self.linux_extensions.profiles.get(&profile) {
+            commands::listen(&view.webview(), profile, state.shortcuts.clone());
+            menus::listen(&view.webview(), profile, state.menus.clone());
+        }
         self.linux_extensions_sync(profile);
         // The view is not among the profile's tabs until it is built.
         self.linux_dnr_add_to(profile, &view.webview());
@@ -302,9 +318,13 @@ impl super::EngineHost {
                 install.background = start_background(context, channel, install);
             }
         }
+        *state.shortcuts.borrow_mut() =
+            state.installs.values().flat_map(|install| commands::shortcuts(&install.extension_id, &install.manifest)).collect();
         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
         self.linux_extensions.set_navigation(profile, ids);
         self.linux_dnr_sync(profile);
+        self.linux_menu_table_refresh(profile);
+        self.linux_data_interest(profile);
     }
 
     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {

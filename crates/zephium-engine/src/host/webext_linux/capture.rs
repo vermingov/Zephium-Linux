@@ -17,6 +17,7 @@ const MAX_PIXELS: f64 = 64_000_000.0;
 #[derive(Debug, PartialEq)]
 struct Shot {
     rect: Option<(f64, f64, f64, f64)>,
+    /// Pixels per CSS pixel; 0 keeps the screen's.
     scale: f64,
 }
 
@@ -33,9 +34,10 @@ fn shot(options: &Value) -> Result<Shot, String> {
         }
         _ => None,
     };
-    let scale = options["scale"].as_f64().filter(|scale| scale.is_finite() && *scale > 0.0).unwrap_or(1.0).min(4.0);
+    // Without a scale, the picture keeps the screen's pixels, as in Firefox.
+    let scale = options["scale"].as_f64().filter(|scale| scale.is_finite() && *scale > 0.0).unwrap_or(0.0).min(4.0);
     if let Some((_, _, width, height)) = rect {
-        if width * height * scale * scale > MAX_PIXELS {
+        if width * height * scale.max(1.0) * scale.max(1.0) > MAX_PIXELS {
             return Err("The capture is larger than the browser draws.".into());
         }
     }
@@ -74,12 +76,17 @@ impl super::super::EngineHost {
 /// The snapshot cropped and scaled as asked, as a PNG data URL.
 fn encode(surface: &gtk::cairo::Surface, shot: &Shot) -> Result<String, String> {
     let image = gtk::cairo::ImageSurface::try_from(surface.clone()).map_err(|_| "WebKit drew no image")?;
+    // WebKit draws at the screen's scale: on a 1.5x output a CSS pixel is
+    // 1.5 pixels of the snapshot. Crop in the snapshot's pixels.
+    let (device_scale, _) = image.device_scale();
+    let device_scale = if device_scale > 0.0 { device_scale } else { 1.0 };
     let (full_width, full_height) = (image.width(), image.height());
     let (x, y, width, height) = match shot.rect {
         Some((x, y, width, height)) => {
-            let x = (x.max(0.0) as i32).min(full_width);
-            let y = (y.max(0.0) as i32).min(full_height);
-            (x, y, (width as i32).min(full_width - x), (height as i32).min(full_height - y))
+            let to_pixels = |value: f64| (value * device_scale).round() as i32;
+            let x = to_pixels(x.max(0.0)).min(full_width);
+            let y = to_pixels(y.max(0.0)).min(full_height);
+            (x, y, to_pixels(width).min(full_width - x), to_pixels(height).min(full_height - y))
         }
         None => (0, 0, full_width, full_height),
     };
@@ -87,8 +94,11 @@ fn encode(surface: &gtk::cairo::Surface, shot: &Shot) -> Result<String, String> 
         return Err("the rectangle lies outside the page".into());
     }
     let mut picture = gtk::gdk::pixbuf_get_from_surface(&image, x, y, width, height).ok_or("the snapshot could not be read")?;
-    if (shot.scale - 1.0).abs() > f64::EPSILON {
-        let (scaled_width, scaled_height) = (((width as f64) * shot.scale).round() as i32, ((height as f64) * shot.scale).round() as i32);
+    // The scale asked for is per CSS pixel; the snapshot already carries the
+    // screen's.
+    let resize = if shot.scale > 0.0 { shot.scale / device_scale } else { 1.0 };
+    if (resize - 1.0).abs() > f64::EPSILON {
+        let (scaled_width, scaled_height) = (((width as f64) * resize).round() as i32, ((height as f64) * resize).round() as i32);
         picture = picture
             .scale_simple(scaled_width.max(1), scaled_height.max(1), gtk::gdk_pixbuf::InterpType::Bilinear)
             .ok_or("the snapshot could not be scaled")?;
@@ -103,7 +113,7 @@ mod tests {
 
     #[test]
     fn options_read_as_chrome_and_firefox_give_them() {
-        assert_eq!(shot(&Value::Null).unwrap(), Shot { rect: None, scale: 1.0 });
+        assert_eq!(shot(&Value::Null).unwrap(), Shot { rect: None, scale: 0.0 });
         let firefox = json!({ "format": "png", "rect": { "x": 0, "y": 10, "width": 300, "height": 200 }, "scale": 2 });
         assert_eq!(shot(&firefox).unwrap(), Shot { rect: Some((0.0, 10.0, 300.0, 200.0)), scale: 2.0 });
         assert!(shot(&json!({ "rect": { "x": 0, "y": 0, "width": 0, "height": 5 } })).is_err());

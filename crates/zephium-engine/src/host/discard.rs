@@ -1873,8 +1873,10 @@ mod tests {
         assert!(DISCARD_SAFETY_BOOTSTRAP_JS
             .contains("((localUncertain || (editedEver && localIncomplete)) ? 256 : 0)"));
         // A reload rebuilds ordinary scripted work, and patching these APIs
-        // is visible to anti-bot scripts.
+        // is visible to anti-bot scripts. A wrapped addEventListener stops
+        // krunker.io loading, even as a proxy that changes nothing.
         for unpatched in [
+            "addEventListener =",
             "'fetch'",
             "XMLHttpRequest",
             "'WebSocket'",

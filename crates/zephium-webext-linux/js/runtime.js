@@ -70,6 +70,9 @@
     };
   }
 
+  // Menu items' onclick callbacks, by item ID.
+  const menuClicks = new Map();
+
   // A promise delivered as a method's answer would be.
   function settle(pending, callback) {
     if (!callback) return pending;
@@ -394,11 +397,16 @@
       contextMenus: namespace("contextMenus", {
         create: (properties, callback) => {
           const id = properties.id ?? `zephium-menu-${nextRequest}`;
+          if (typeof properties.onclick === "function") menuClicks.set(id, properties.onclick);
           method("contextMenus.create")({ ...properties, id, onclick: undefined }, callback);
           return id;
         },
-        update: undefined, remove: undefined, removeAll: undefined,
-      }, ["onClicked"]),
+        update: (id, properties, callback) => {
+          if (typeof properties?.onclick === "function") menuClicks.set(id, properties.onclick);
+          return method("contextMenus.update")(id, { ...properties, onclick: undefined }, callback);
+        },
+        remove: undefined, removeAll: undefined, refresh: undefined,
+      }, ["onClicked", "onShown", "onHidden"]),
       commands: namespace("commands", { getAll: undefined }, ["onCommand"]),
       notifications: namespace("notifications", {
         create: undefined, update: undefined, clear: undefined, getAll: undefined,
@@ -410,6 +418,43 @@
         ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred",
           "onHistoryStateUpdated", "onReferenceFragmentUpdated"]),
     });
+    // The browser's own stores, read and written by the shell; the argument
+    // objects are the macOS port's, whose translation the browser shares.
+    const data = (api, fields, callback) => settle(request(api, [fields]), callback);
+    Object.assign(chrome, {
+      history: namespace("history", {
+        search: (details, callback) => data("history.search", { details }, callback),
+        getVisits: (details, callback) => data("history.getVisits", { details }, callback),
+        addUrl: (details, callback) => data("history.addUrl", { details }, callback),
+        deleteUrl: (details, callback) => data("history.deleteUrl", { details }, callback),
+        deleteRange: (details, callback) => data("history.deleteRange", { details }, callback),
+        deleteAll: (callback) => data("history.deleteAll", { details: {} }, callback),
+      }, ["onVisited", "onVisitRemoved", "onTitleChanged"]),
+      bookmarks: namespace("bookmarks", {
+        getTree: (callback) => data("bookmarks.getTree", {}, callback),
+        getSubTree: (id, callback) => data("bookmarks.getSubTree", { id }, callback),
+        getChildren: (id, callback) => data("bookmarks.getChildren", { id }, callback),
+        get: (ids, callback) => data("bookmarks.get", { ids: [].concat(ids) }, callback),
+        getRecent: (count, callback) => data("bookmarks.getRecent", { count }, callback),
+        search: (query, callback) => data("bookmarks.search", { details: query }, callback),
+        create: (bookmark, callback) => data("bookmarks.create", { details: bookmark || {} }, callback),
+        update: (id, changes, callback) => data("bookmarks.update", { id, details: changes || {} }, callback),
+        move: (id, destination, callback) => data("bookmarks.move", { id, details: destination || {} }, callback),
+        remove: (id, callback) => data("bookmarks.remove", { id }, callback),
+        removeTree: (id, callback) => data("bookmarks.removeTree", { id }, callback),
+      }, ["onCreated", "onChanged", "onMoved", "onRemoved", "onChildrenReordered", "onImportBegan", "onImportEnded"]),
+      sessions: namespace("sessions", {
+        getRecentlyClosed: (filter, callback) => typeof filter === "function"
+          ? data("sessions.getRecentlyClosed", {}, filter)
+          : data("sessions.getRecentlyClosed", { filter }, callback),
+        getDevices: (filter, callback) => settle(Promise.resolve([]), typeof filter === "function" ? filter : callback),
+        restore: (sessionId, callback) => typeof sessionId === "function"
+          ? data("sessions.restore", {}, sessionId)
+          : data("sessions.restore", { sessionId }, callback),
+      }, ["onChanged"]),
+      topSites: namespace("topSites", { get: (callback) => data("topSites.get", {}, callback) }),
+    });
+    chrome.sessions.MAX_SESSION_RESULTS = 25;
     // Present so a background that listens at start keeps running; WebKitGTK
     // gives the port no hook into requests, so these events never fire.
     Object.assign(chrome, {
@@ -428,8 +473,27 @@
         }),
       }, ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]),
     });
+    // Firefox's contentScripts.register, over scripting's registrations: the
+    // promise gives an object that unregisters them. Files only.
+    chrome.contentScripts = {
+      register: async (options) => {
+        const files = (list) => (list || []).map((entry) => entry.file).filter(Boolean);
+        if ((options.js || []).some((entry) => !entry.file) || (options.css || []).some((entry) => !entry.file)) {
+          throw new Error("contentScripts.register takes files only on Linux.");
+        }
+        const id = `zephium-registered-${Date.now()}-${nextRequest}`;
+        await request("scripting.registerContentScripts", [[{
+          id, matches: options.matches, excludeMatches: options.excludeMatches,
+          js: files(options.js), css: files(options.css),
+          runAt: options.runAt, allFrames: options.allFrames, persistAcrossSessions: false,
+        }]]);
+        return { unregister: () => request("scripting.unregisterContentScripts", [{ ids: [id] }]) };
+      },
+    };
     // Firefox's name for contextMenus.
     chrome.menus = chrome.contextMenus;
+    // An item's own onclick, which cannot travel to the browser, runs here.
+    chrome.contextMenus.onClicked.addListener((info, tab) => menuClicks.get(info.menuItemId)?.(info, tab));
     Object.assign(runtime, {
       getBackgroundPage: () => Promise.reject(new Error("The background page runs in its own view on Linux.")),
     });

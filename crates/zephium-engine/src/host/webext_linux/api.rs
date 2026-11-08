@@ -96,6 +96,13 @@ impl super::super::EngineHost {
             "scripting.executeScript" | "scripting.insertCSS" | "scripting.removeCSS" | "tabs.executeScript" | "tabs.insertCSS" | "tabs.removeCSS" => {
                 return self.linux_inject(profile, message, id, &api, &args);
             }
+            "cookies.get" | "cookies.getAll" | "cookies.set" | "cookies.remove" | "cookies.getAllCookieStores" => {
+                let method = api.trim_start_matches("cookies.").to_owned();
+                return self.linux_cookies(profile, message, id, &method, &args);
+            }
+            data if zephium_webext_linux::browser_data::handles(data) => {
+                return self.linux_browser_data(profile, message, id, &api, &args);
+            }
             "tabs.captureVisibleTab" | "tabs.captureTab" => {
                 return self.linux_capture(profile, message, id, &api, &args);
             }
@@ -227,8 +234,7 @@ impl super::super::EngineHost {
             "extension" if method == "isAllowedIncognitoAccess" => Ok(json!(false)),
             "commands" if method == "getAll" => Ok(self.linux_commands(profile, extension_id)),
             "notifications" => linux_notification(extension_id, method, args),
-            "contextMenus" => Ok(Value::Null),
-            "cookies" => Ok(if method == "getAll" { json!([]) } else { Value::Null }),
+            "contextMenus" => self.linux_menus(profile, extension_id, method, args),
             "webNavigation" => Ok(Value::Null),
             _ => unsupported(api),
         };
@@ -498,7 +504,7 @@ impl super::super::EngineHost {
         self.linux_all_tabs(profile).into_iter().find(|tab| tab["id"] == number)
     }
 
-    fn linux_tab_of_view(&self, profile: ProfileId, view: &WebView) -> Option<ItemId> {
+    pub(super) fn linux_tab_of_view(&self, profile: ProfileId, view: &WebView) -> Option<ItemId> {
         use wry::WebViewExtUnix;
         self.views
             .iter()
