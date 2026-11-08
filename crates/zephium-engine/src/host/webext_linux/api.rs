@@ -227,7 +227,7 @@ impl super::super::EngineHost {
             "extension" if method == "isAllowedIncognitoAccess" => Ok(json!(false)),
             "commands" if method == "getAll" => Ok(self.linux_commands(profile, extension_id)),
             "notifications" => linux_notification(extension_id, method, args),
-            "contextMenus" => Ok(Value::Null),
+            "contextMenus" => self.linux_menus(profile, extension_id, method, args),
             "cookies" => Ok(if method == "getAll" { json!([]) } else { Value::Null }),
             "webNavigation" => Ok(Value::Null),
             _ => unsupported(api),

@@ -70,6 +70,9 @@
     };
   }
 
+  // Menu items' onclick callbacks, by item ID.
+  const menuClicks = new Map();
+
   // A promise delivered as a method's answer would be.
   function settle(pending, callback) {
     if (!callback) return pending;
@@ -394,11 +397,16 @@
       contextMenus: namespace("contextMenus", {
         create: (properties, callback) => {
           const id = properties.id ?? `zephium-menu-${nextRequest}`;
+          if (typeof properties.onclick === "function") menuClicks.set(id, properties.onclick);
           method("contextMenus.create")({ ...properties, id, onclick: undefined }, callback);
           return id;
         },
-        update: undefined, remove: undefined, removeAll: undefined,
-      }, ["onClicked"]),
+        update: (id, properties, callback) => {
+          if (typeof properties?.onclick === "function") menuClicks.set(id, properties.onclick);
+          return method("contextMenus.update")(id, { ...properties, onclick: undefined }, callback);
+        },
+        remove: undefined, removeAll: undefined, refresh: undefined,
+      }, ["onClicked", "onShown", "onHidden"]),
       commands: namespace("commands", { getAll: undefined }, ["onCommand"]),
       notifications: namespace("notifications", {
         create: undefined, update: undefined, clear: undefined, getAll: undefined,
@@ -430,6 +438,8 @@
     });
     // Firefox's name for contextMenus.
     chrome.menus = chrome.contextMenus;
+    // An item's own onclick, which cannot travel to the browser, runs here.
+    chrome.contextMenus.onClicked.addListener((info, tab) => menuClicks.get(info.menuItemId)?.(info, tab));
     Object.assign(runtime, {
       getBackgroundPage: () => Promise.reject(new Error("The background page runs in its own view on Linux.")),
     });

@@ -14,6 +14,7 @@ mod commands;
 mod dnr;
 mod downloads;
 mod events;
+mod menus;
 mod registered;
 mod routing;
 mod scheme;
@@ -73,8 +74,10 @@ pub(super) struct ProfileExtensions {
     packages: scheme::Packages,
     installs: HashMap<ExtensionInstallId, Install>,
     routing: routing::Routing,
-    /// The installed extensions' keyboard commands, read by each tab.
+    /// The installed extensions' keyboard commands and menu items, read by
+    /// each tab.
     shortcuts: commands::Shortcuts,
+    menus: menus::MenuTable,
     /// The browser window that last had focus, Chrome's "current window"
     /// for a popup while the popup has the keyboard.
     last_focused: Option<zephium_core::ids::WindowId>,
@@ -109,6 +112,7 @@ pub(super) struct Install {
     manifest_groups: Vec<zephium_webext_linux::content::Group>,
     pub(super) registered: registered::Registered,
     pub(super) downloads: downloads::Downloads,
+    pub(super) menus: menus::Menus,
     pub(super) action: action::ActionState,
     pub(super) alarms: HashMap<String, gtk::glib::SourceId>,
     pub(super) popup: Option<action::Popup>,
@@ -176,6 +180,7 @@ impl Install {
             manifest_groups,
             registered: registered::Registered::open(storage.as_deref()),
             downloads: downloads::Downloads::default(),
+            menus: menus::Menus::default(),
             storage: api::Storage::open(storage)?,
             action: action::ActionState::from_manifest(&manifest, &load.root),
             alarms: HashMap::new(),
@@ -274,6 +279,7 @@ impl super::EngineHost {
         }
         if let Some(state) = self.linux_extensions.profiles.get(&profile) {
             commands::listen(&view.webview(), profile, state.shortcuts.clone());
+            menus::listen(&view.webview(), profile, state.menus.clone());
         }
         self.linux_extensions_sync(profile);
         // The view is not among the profile's tabs until it is built.
@@ -313,6 +319,7 @@ impl super::EngineHost {
         let ids = state.installs.values().map(|install| install.extension_id.clone()).collect();
         self.linux_extensions.set_navigation(profile, ids);
         self.linux_dnr_sync(profile);
+        self.linux_menu_table_refresh(profile);
     }
 
     fn linux_stop_install(&mut self, profile: ProfileId, install: ExtensionInstallId) -> Option<Install> {
