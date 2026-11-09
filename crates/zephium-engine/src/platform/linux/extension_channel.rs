@@ -177,13 +177,11 @@ pub(crate) fn attach(context: &WebContext) -> Option<Rc<Channel>> {
     };
     context.set_web_extensions_directory(&directory.to_string_lossy());
     let channel = Rc::new(Channel::default());
-    // The plugin's pages ask about their requests on the broker's socket;
-    // the sandbox shows them its directory, read-only, and nothing else new.
+    // The plugin's pages ask about their requests on the broker's socket,
+    // whose directory `prepare_sandbox` showed them when the context was
+    // built. A page that cannot reach it lets its requests go.
     if let Some(socket) = super::request_broker::serve() {
-        if let Some(directory) = socket.parent() {
-            context.add_path_to_sandbox(directory, true);
-            *channel.socket.borrow_mut() = socket.to_string_lossy().into_owned();
-        }
+        *channel.socket.borrow_mut() = socket.to_string_lossy().into_owned();
     }
     let starting = channel.clone();
     context.connect_initialize_web_extensions(move |context| {
@@ -193,6 +191,17 @@ pub(crate) fn attach(context: &WebContext) -> Option<Rc<Channel>> {
     // here, and lives exactly as long as the context GLib object.
     unsafe { context.set_data(CHANNEL_KEY, channel.clone()) };
     Some(channel)
+}
+
+/// Show the content processes of a new persistent `context` the request
+/// broker's directory, read-only, which is enough to connect to its socket and
+/// the only thing added to their sandbox. WebKit allows it only before the
+/// context's first web process, and aborts after it, so it happens where the
+/// context is built.
+pub(crate) fn prepare_sandbox(context: &wry::WebContext) {
+    if let Some(directory) = super::request_broker::serve().and_then(|socket| socket.parent()) {
+        context.add_path_to_sandbox(directory, true);
+    }
 }
 
 pub(crate) fn channel(context: &WebContext) -> Option<Rc<Channel>> {
