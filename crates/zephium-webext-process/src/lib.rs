@@ -36,6 +36,8 @@ mod events;
 mod ffi;
 pub mod matching;
 #[cfg(all(unix, not(target_os = "macos")))]
+mod requests;
+#[cfg(all(unix, not(target_os = "macos")))]
 mod run;
 #[cfg(all(unix, not(target_os = "macos")))]
 mod worlds;
@@ -71,12 +73,13 @@ pub const CONTEXT_GLOBAL: &str = "__zephiumWebextContext";
 /// Schemes whose pages are an extension's own: Chrome's, and Firefox's for
 /// add-ons installed from addons.mozilla.org.
 pub const EXTENSION_SCHEMES: [&str; 2] = ["chrome-extension://", "moz-extension://"];
-/// Initialization data type: the per-message byte limit, then for each
-/// enabled extension its ID, its info block, the host patterns the user
-/// granted it, and its content-script groups: matches, exclude_matches,
-/// scripts, run_at, all_frames. A group runs only where both its own matches
-/// and the grant match.
-pub const INIT_DATA_TYPE: &str = "(ua(ssasa(asasassb)))";
+/// Initialization data type: the per-message byte limit; for each enabled
+/// extension its ID, its info block, the host patterns the user granted it,
+/// and its content-script groups: matches, exclude_matches, scripts, run_at,
+/// all_frames; then the socket that answers blocking `webRequest` questions
+/// (empty for none) and the URL patterns anyone listens for. A group runs
+/// only where both its own matches and the grant match.
+pub const INIT_DATA_TYPE: &str = "(ua(ssasa(asasassb))sas)";
 
 /// One `content_scripts` entry as the plugin gets it.
 pub type InitGroup = (Vec<String>, Vec<String>, Vec<String>, String, bool);
@@ -91,6 +94,7 @@ mod plugin {
     use glib::translate::FromGlibPtrNone;
 
     use crate::ffi::WebKitWebExtension;
+    use crate::requests::Interception;
     use crate::{events, worlds, InitExtension, INIT_DATA_TYPE};
 
     /// What the browser enabled for this web process at its start.
@@ -98,6 +102,7 @@ mod plugin {
         pub(crate) extension: *mut WebKitWebExtension,
         pub(crate) message_limit: usize,
         pub(crate) extensions: HashMap<String, Extension>,
+        pub(crate) interception: Interception,
     }
 
     pub(crate) struct Extension {
@@ -136,7 +141,12 @@ mod plugin {
         user_data: *const glib::ffi::GVariant,
     ) {
         PLUGIN.with(|plugin| {
-            *plugin.borrow_mut() = Some(Plugin { extension, message_limit: 0, extensions: HashMap::new() });
+            *plugin.borrow_mut() = Some(Plugin {
+                extension,
+                message_limit: 0,
+                extensions: HashMap::new(),
+                interception: Interception::default(),
+            });
         });
         if !user_data.is_null() {
             configure(&glib::Variant::from_glib_none(user_data));
@@ -151,7 +161,7 @@ mod plugin {
         if data.type_().as_str() != INIT_DATA_TYPE {
             return false;
         }
-        let Some((limit, enabled)) = data.get::<(u32, Vec<InitExtension>)>() else {
+        let Some((limit, enabled, socket, patterns)) = data.get::<(u32, Vec<InitExtension>, String, Vec<String>)>() else {
             return false;
         };
         PLUGIN.with(|plugin| {
@@ -170,6 +180,7 @@ mod plugin {
                 })
                 .collect();
             plugin.message_limit = limit as usize;
+            plugin.interception = Interception { socket, patterns };
             true
         })
     }

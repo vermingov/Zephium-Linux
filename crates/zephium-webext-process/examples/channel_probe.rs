@@ -85,7 +85,7 @@ mod probe {
         let context = WebContext::new();
         context.set_sandbox_enabled(true);
         context.set_web_extensions_directory(&plugin_dir);
-        let init = (LIMIT, extensions()).to_variant();
+        let init = (LIMIT, extensions(), String::new(), Vec::<String>::new()).to_variant();
         assert_eq!(init.type_().as_str(), zephium_webext_process::INIT_DATA_TYPE);
         context.connect_initialize_web_extensions(move |context| {
             context.set_web_extensions_initialization_user_data(&init);

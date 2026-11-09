@@ -1,6 +1,8 @@
 //! Tab and window events. The shell publishes its windows and tabs as one
 //! snapshot whenever they change; what differs between two snapshots is what
-//! `tabs.on*` and `windows.on*` report.
+//! `tabs.on*` and `windows.on*` report, and `webNavigation.on*` for each
+//! tab's top frame: a new address is a committed navigation, a load that
+//! completes is the document's end.
 
 use serde_json::{json, Map, Value};
 use zephium_core::extensions::ExtensionBrowserSurface;
@@ -42,15 +44,32 @@ fn events(before: &Snapshot, after: &Snapshot) -> Vec<(&'static str, Value)> {
     }
     for tab in &after.tabs {
         let old = find(&before.tabs, &tab["id"]);
+        let navigated = tab["url"].as_str().is_some_and(|url| !url.is_empty()) && old.as_ref().is_none_or(|old| old["url"] != tab["url"]);
+        // Chrome's order: a tab is created, then its first navigation commits;
+        // a later commit comes before the tab reports its new address.
+        let commit = ("webNavigation.onCommitted", json!([navigation(tab, true)]));
         match &old {
-            None => events.push(("tabs.onCreated", json!([tab]))),
+            None => {
+                events.push(("tabs.onCreated", json!([tab])));
+                if navigated {
+                    events.push(commit);
+                }
+            }
             Some(old) => {
+                if navigated {
+                    events.push(commit);
+                }
                 let changes: Map<String, Value> =
                     UPDATED_FIELDS.iter().filter(|field| old[**field] != tab[**field]).map(|field| ((*field).to_owned(), tab[*field].clone())).collect();
                 if !changes.is_empty() {
                     events.push(("tabs.onUpdated", json!([tab["id"], changes, tab])));
                 }
             }
+        }
+        let completed = tab["status"] == "complete" && old.as_ref().is_none_or(|old| old["status"] != "complete" || navigated);
+        if completed && tab["url"].as_str().is_some_and(|url| !url.is_empty()) {
+            events.push(("webNavigation.onDOMContentLoaded", json!([navigation(tab, false)])));
+            events.push(("webNavigation.onCompleted", json!([navigation(tab, false)])));
         }
         if tab["active"] == true && old.is_none_or(|old| old["active"] != true) {
             events.push(("tabs.onActivated", json!([{ "tabId": tab["id"], "windowId": tab["windowId"] }])));
@@ -69,6 +88,27 @@ fn events(before: &Snapshot, after: &Snapshot) -> Vec<(&'static str, Value)> {
         events.push(("windows.onFocusChanged", json!([after.focused])));
     }
     events
+}
+
+/// A `webNavigation` event's details for `tab`'s top frame; a commit says
+/// how it came about, as far as the port knows: by a link.
+fn navigation(tab: &Value, commit: bool) -> Value {
+    let time = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |elapsed| elapsed.as_secs_f64() * 1000.0);
+    let mut details = json!({
+        "tabId": tab["id"],
+        "url": tab["url"],
+        "frameId": 0,
+        "parentFrameId": -1,
+        "processId": -1,
+        "timeStamp": time,
+        "frameType": "outermost_frame",
+        "documentLifecycle": "active",
+    });
+    if commit {
+        details["transitionType"] = json!("link");
+        details["transitionQualifiers"] = json!([]);
+    }
+    details
 }
 
 impl super::super::EngineHost {
@@ -128,7 +168,10 @@ mod tests {
     fn a_new_active_tab_is_created_then_activated() {
         let before = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
         let after = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, false, "a"), tab(2, 1, true, "b")], focused: 1 };
-        assert_eq!(names(&events(&before, &after)), ["tabs.onCreated", "tabs.onActivated"]);
+        assert_eq!(
+            names(&events(&before, &after)),
+            ["tabs.onCreated", "webNavigation.onCommitted", "webNavigation.onDOMContentLoaded", "webNavigation.onCompleted", "tabs.onActivated"]
+        );
     }
 
     #[test]
@@ -138,6 +181,19 @@ mod tests {
         let events = events(&before, &after);
         assert_eq!(names(&events), ["tabs.onUpdated"]);
         assert_eq!(events[0].1[1], json!({ "title": "b" }));
+    }
+
+    #[test]
+    fn a_new_address_is_a_committed_navigation_and_a_finished_load_completes_it() {
+        let loading = |url: &str| json!({ "id": 1, "windowId": 1, "active": true, "title": "a", "status": "loading", "url": url });
+        let before = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
+        let moved = Snapshot { windows: vec![1], tabs: vec![loading("https://y.test/")], focused: 1 };
+        assert_eq!(names(&events(&before, &moved)), ["webNavigation.onCommitted", "tabs.onUpdated"]);
+        let done = Snapshot { windows: vec![1], tabs: vec![tab(1, 1, true, "a")], focused: 1 };
+        let mut done_tab = done.tabs[0].clone();
+        done_tab["url"] = json!("https://y.test/");
+        let done = Snapshot { tabs: vec![done_tab], ..done };
+        assert_eq!(names(&events(&moved, &done)), ["tabs.onUpdated", "webNavigation.onDOMContentLoaded", "webNavigation.onCompleted"]);
     }
 
     #[test]

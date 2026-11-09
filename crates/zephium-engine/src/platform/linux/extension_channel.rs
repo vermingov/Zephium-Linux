@@ -101,6 +101,10 @@ pub(crate) struct Channel {
     /// new page asks for it.
     data: RefCell<Option<gtk::glib::Variant>>,
     handler: RefCell<Option<Handler>>,
+    /// The socket blocking `webRequest` questions go to, empty without one.
+    socket: RefCell<String>,
+    /// The URL patterns any extension's `webRequest` listeners watch.
+    interception: RefCell<Vec<String>>,
 }
 
 impl Channel {
@@ -108,6 +112,17 @@ impl Channel {
     pub(crate) fn set_extensions(&self, extensions: Vec<ChannelExtension>) {
         *self.extensions.borrow_mut() = extensions;
         self.data.take();
+    }
+
+    /// Pages ask about requests to `patterns` from now on; `false` when that
+    /// is what they already do.
+    pub(crate) fn set_interception(&self, patterns: Vec<String>) -> bool {
+        if *self.interception.borrow() == patterns {
+            return false;
+        }
+        *self.interception.borrow_mut() = patterns;
+        self.data.take();
+        true
     }
 
     pub(crate) fn set_handler(&self, handler: impl Fn(Message) + 'static) {
@@ -121,7 +136,8 @@ impl Channel {
         }
         let extensions: Vec<zephium_webext_process::InitExtension> =
             self.extensions.borrow().iter().map(|e| (e.id.clone(), e.info.clone(), e.granted.clone(), e.groups.clone())).collect();
-        let data = (MESSAGE_LIMIT as u32, extensions).to_variant();
+        let data =
+            (MESSAGE_LIMIT as u32, extensions, self.socket.borrow().clone(), self.interception.borrow().clone()).to_variant();
         debug_assert_eq!(data.type_().as_str(), INIT_DATA_TYPE);
         *self.data.borrow_mut() = Some(data.clone());
         data
@@ -161,6 +177,14 @@ pub(crate) fn attach(context: &WebContext) -> Option<Rc<Channel>> {
     };
     context.set_web_extensions_directory(&directory.to_string_lossy());
     let channel = Rc::new(Channel::default());
+    // The plugin's pages ask about their requests on the broker's socket;
+    // the sandbox shows them its directory, read-only, and nothing else new.
+    if let Some(socket) = super::request_broker::serve() {
+        if let Some(directory) = socket.parent() {
+            context.add_path_to_sandbox(directory, true);
+            *channel.socket.borrow_mut() = socket.to_string_lossy().into_owned();
+        }
+    }
     let starting = channel.clone();
     context.connect_initialize_web_extensions(move |context| {
         context.set_web_extensions_initialization_user_data(&starting.current_data());

@@ -65,7 +65,7 @@ const GAPS: &[(&[Uses], &str, u8)] = &[
     (
         &[Permission("webRequestBlocking")],
         "Can't block requests the old way (webRequestBlocking)",
-        MAC | LIN,
+        MAC,
     ),
     (&[Permission("tabGroups")], "Can't manage tab groups", MAC | LIN),
     (
@@ -256,12 +256,13 @@ mod tests {
             ]
         );
         assert_eq!(
-            assess(raw, Platform::Windows),
+            assess(raw.clone(), Platform::Windows),
             [
                 "Developer tools panels aren't available",
                 "Can't replace the new tab page"
             ]
         );
+        assert!(!assess(raw, Platform::Linux).iter().any(|gap| gap.contains("webRequestBlocking")));
     }
 
     #[test]

@@ -8,6 +8,7 @@ pub(crate) mod extension_channel;
 mod find;
 mod frame_documents;
 mod fullscreen;
+pub(crate) mod request_broker;
 mod web_features;
 mod stage;
 pub(crate) mod store_button;

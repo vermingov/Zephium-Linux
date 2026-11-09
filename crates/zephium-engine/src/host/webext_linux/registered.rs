@@ -107,7 +107,8 @@ fn script_id(script: &Value) -> Result<&str, String> {
     }
 }
 
-/// A registration as a plugin group, its files read from `package`. Scripts
+/// A registration as a plugin group, its files read from `package`, then
+/// the code it carries as text (Firefox's `contentScripts.register`). Scripts
 /// for the page's own world wait, as the manifest's do.
 fn group(package: &Path, script: &Value) -> Result<Group, String> {
     if script["world"] == "MAIN" {
@@ -117,7 +118,11 @@ fn group(package: &Path, script: &Value) -> Result<Group, String> {
         script[key].as_array().map(|list| list.iter().filter_map(|item| item.as_str().map(|text| text.trim_start_matches('/').to_owned())).collect()).unwrap_or_default()
     };
     let (js, css) = (strings("js"), strings("css"));
-    if js.is_empty() && css.is_empty() {
+    let texts = |key: &str| -> Vec<String> {
+        script[key].as_array().map(|list| list.iter().filter_map(|item| item.as_str().map(str::to_owned)).collect()).unwrap_or_default()
+    };
+    let (js_code, css_code) = (texts("jsCode"), texts("cssCode"));
+    if js.is_empty() && css.is_empty() && js_code.is_empty() && css_code.is_empty() {
         return Err(format!("Script with ID '{}' must specify at least one js or css file.", script["id"].as_str().unwrap_or_default()));
     }
     let matches = strings("matches");
@@ -129,8 +134,12 @@ fn group(package: &Path, script: &Value) -> Result<Group, String> {
         Some("document_end") => "document_end",
         _ => "document_idle",
     };
-    let js: Vec<String> = if js.is_empty() { js } else { std::iter::once(API_LAYER.to_owned()).chain(js).collect() };
-    content::group(package, matches, strings("excludeMatches"), &js, &css, run_at, script["allFrames"] == true)
+    let js: Vec<String> =
+        if js.is_empty() && js_code.is_empty() { js } else { std::iter::once(API_LAYER.to_owned()).chain(js).collect() };
+    let mut group = content::group(package, matches, strings("excludeMatches"), &js, &css, run_at, script["allFrames"] == true)?;
+    group.js.extend(js_code);
+    group.css.extend(css_code);
+    Ok(group)
 }
 
 impl super::super::EngineHost {
@@ -179,6 +188,15 @@ mod tests {
         assert_eq!(listed.as_array().unwrap().len(), 1);
         registered.call(dir.path(), "unregisterContentScripts", &[json!({})]).unwrap();
         assert!(registered.groups(dir.path()).is_empty());
+    }
+
+    #[test]
+    fn code_runs_after_the_files() {
+        let dir = package();
+        let mut registered = Registered::open(None);
+        let script = json!({ "id": "c", "matches": ["<all_urls>"], "js": [], "jsCode": ["two()"], "runAt": "document_start" });
+        registered.call(dir.path(), "registerContentScripts", &[json!([script])]).unwrap();
+        assert_eq!(registered.groups(dir.path())[0].js, ["api()", "two()"]);
     }
 
     #[test]

@@ -236,6 +236,14 @@ impl super::super::EngineHost {
             "notifications" => linux_notification(extension_id, method, args),
             "contextMenus" => self.linux_menus(profile, extension_id, method, args),
             "webNavigation" => Ok(Value::Null),
+            "webRequest" => match method {
+                "listeners" => self.linux_web_request_listeners(profile, message, args.first().unwrap_or(&Value::Null)),
+                "answer" => {
+                    self.linux_web_request_answered(arg_u64(args, 0), extension_id, args.get(1).unwrap_or(&Value::Null));
+                    Ok(Value::Null)
+                }
+                _ => unsupported(api),
+            },
             _ => unsupported(api),
         };
         Outcome::Answer(result)

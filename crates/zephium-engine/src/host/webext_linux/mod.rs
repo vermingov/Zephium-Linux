@@ -20,6 +20,7 @@ mod menus;
 mod registered;
 mod routing;
 mod scheme;
+mod web_request;
 
 /// Log one step of the runtime when `ZEPHIUM_WEBEXT_TRACE` is set; silent
 /// otherwise. For finding where an extension stops working.
@@ -62,6 +63,8 @@ pub(super) struct LinuxExtensions {
     next_request: u64,
     /// History, bookmark and session requests waiting for the shell.
     data: browser_data::Pending,
+    /// Page requests waiting for blocking `webRequest` listeners.
+    web_requests: web_request::Pending,
 }
 
 impl LinuxExtensions {
@@ -129,6 +132,8 @@ pub(super) struct Install {
     /// Tabs the user clicked the extension's action on: `activeTab` lets it
     /// script them although it has no host permission for them.
     pub(super) active_tabs: HashSet<zephium_core::ids::ItemId>,
+    /// The background's `webRequest` listeners.
+    pub(super) web_request: Vec<web_request::Listener>,
 }
 
 impl Install {
@@ -196,6 +201,7 @@ impl Install {
             alarms: HashMap::new(),
             popup: None,
             active_tabs: HashSet::new(),
+            web_request: Vec::new(),
             manifest,
         };
         install.refresh_groups();
@@ -317,6 +323,7 @@ impl super::EngineHost {
         }
         if let Some(channel) = &state.channel {
             channel.set_extensions(state.installs.values().map(|install| install.channel.clone()).collect());
+            channel.set_interception(web_request::interception(state.installs.values()));
             // Processes already running learn the change now; new ones ask.
             let data = channel.current_data();
             let own = state.installs.values().flat_map(Install::own_views);

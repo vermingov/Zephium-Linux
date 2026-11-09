@@ -139,6 +139,101 @@
 
   const events = new Map();
 
+  // ---- webRequest -------------------------------------------------------------
+
+  // Chrome match patterns as regular expressions, for listener filters.
+  function patternRegExp(pattern) {
+    if (pattern === "<all_urls>") return /^(?:https?|wss?|file|ftp):\/\//;
+    const match = /^(\*|[a-z][a-z0-9+.-]*):\/\/(\*|\*\.[^/*]+|[^/*]*)(\/.*)$/.exec(pattern);
+    if (!match) return /$^/;
+    const [, scheme, host, path] = match;
+    const escape = (text) => text.replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+    const schemePart = scheme === "*" ? "(?:https?|wss?)" : escape(scheme);
+    const hostPart = host === "*" ? "[^/]*" : host.startsWith("*.") ? `(?:[^/]*\\.)?${escape(host.slice(2))}(?::\\d+)?` : `${escape(host)}(?::\\d+)?`;
+    const pathPart = path.split("*").map(escape).join(".*");
+    return new RegExp(`^${schemePart}:\\/\\/(?:[^/@]*@)?${hostPart}${pathPart}$`);
+  }
+
+  // One webRequest event. Listeners come with a filter and extra options;
+  // the browser learns every listener's filter, so it asks only about
+  // requests someone wants. A blocking listener's answer (or the promise of
+  // one) cancels or redirects the request: a cancel wins, then the first
+  // redirect.
+  class WebRequestEvent {
+    constructor(name) {
+      this.name = name;
+      this.entries = [];
+    }
+    addListener(listener, filter, extraInfoSpec) {
+      if (typeof listener !== "function" || this.hasListener(listener)) return;
+      const urls = Array.isArray(filter?.urls) ? filter.urls.map(String) : ["<all_urls>"];
+      this.entries.push({
+        listener,
+        urls,
+        matchers: urls.map(patternRegExp),
+        types: Array.isArray(filter?.types) ? filter.types.map(String) : null,
+        tabId: typeof filter?.tabId === "number" ? filter.tabId : null,
+        blocking: Array.isArray(extraInfoSpec) && extraInfoSpec.includes("blocking"),
+      });
+      reportWebRequestListeners();
+    }
+    removeListener(listener) {
+      const before = this.entries.length;
+      this.entries = this.entries.filter((entry) => entry.listener !== listener);
+      if (this.entries.length !== before) reportWebRequestListeners();
+    }
+    hasListener(listener) {
+      return this.entries.some((entry) => entry.listener === listener);
+    }
+    hasListeners() {
+      return this.entries.length > 0;
+    }
+    async deliver(details) {
+      const response = {};
+      for (const entry of this.entries.slice()) {
+        if (entry.types && !entry.types.includes(details.type)) continue;
+        if (entry.tabId !== null && entry.tabId !== details.tabId) continue;
+        if (!entry.matchers.some((matcher) => matcher.test(details.url))) continue;
+        let result;
+        try {
+          result = await entry.listener({ ...details });
+        } catch (error) {
+          console.error(error);
+          continue;
+        }
+        if (!entry.blocking || !result || typeof result !== "object") continue;
+        if (result.cancel === true) return { cancel: true };
+        if (typeof result.redirectUrl === "string" && response.redirectUrl === undefined) {
+          response.redirectUrl = result.redirectUrl;
+        }
+      }
+      return response;
+    }
+  }
+
+  const webRequestEvents = new Map(
+    ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
+      "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]
+      .map((name) => [`webRequest.${name}`, new WebRequestEvent(name)]),
+  );
+
+  // The browser gets the whole list after each change, once per turn.
+  let reportQueued = false;
+  function reportWebRequestListeners() {
+    if (reportQueued) return;
+    reportQueued = true;
+    queueMicrotask(() => {
+      reportQueued = false;
+      const listeners = [];
+      for (const target of webRequestEvents.values()) {
+        for (const { urls, types, blocking } of target.entries) {
+          listeners.push({ event: target.name, urls, types, blocking });
+        }
+      }
+      request("webRequest.listeners", [listeners]).catch(() => {});
+    });
+  }
+
   function event(name) {
     if (!events.has(name)) events.set(name, new ExtensionEvent());
     return events.get(name);
@@ -157,6 +252,11 @@
     } else if (message.event === "runtime.onConnect") {
       const [id, name, sender] = message.args;
       event("runtime.onConnect").dispatch([openPort(id, name, sender)]);
+    } else if (webRequestEvents.has(message.event)) {
+      const decided = webRequestEvents.get(message.event).deliver(message.args[0]);
+      if (message.reply !== undefined) {
+        decided.then((response) => request("webRequest.answer", [message.reply, response]));
+      }
     } else if (events.has(message.event)) {
       events.get(message.event).dispatch(message.args || []);
     }
@@ -327,6 +427,12 @@
     local: storageArea("local"),
     sync: storageArea("sync"),
     session: storageArea("session"),
+    // Administrators set nothing for extensions here: always empty.
+    managed: {
+      get: answer({}),
+      getBytesInUse: answer(0),
+      onChanged: event("storage.managed.onChanged"),
+    },
     onChanged: event("storage.onChanged"),
   };
 
@@ -335,7 +441,7 @@
   if (!isContentScript) {
     const tabs = namespace("tabs", {
       query: undefined, get: undefined, getCurrent: undefined, create: undefined, update: undefined,
-      remove: undefined, reload: undefined, duplicate: undefined, sendMessage: undefined,
+      remove: undefined, reload: undefined, duplicate: undefined, move: undefined, sendMessage: undefined,
       executeScript: undefined, insertCSS: undefined, removeCSS: undefined,
       connect: connector("tabs.connect"), captureVisibleTab: undefined, captureTab: undefined, detectLanguage: undefined,
     }, ["onCreated", "onUpdated", "onActivated", "onRemoved", "onReplaced", "onMoved", "onHighlighted"]);
@@ -416,7 +522,7 @@
       }, ["onChanged"]),
       webNavigation: namespace("webNavigation", { getFrame: undefined, getAllFrames: undefined },
         ["onBeforeNavigate", "onCommitted", "onDOMContentLoaded", "onCompleted", "onErrorOccurred",
-          "onHistoryStateUpdated", "onReferenceFragmentUpdated"]),
+          "onHistoryStateUpdated", "onReferenceFragmentUpdated", "onCreatedNavigationTarget", "onTabReplaced"]),
     });
     // The browser's own stores, read and written by the shell; the argument
     // objects are the macOS port's, whose translation the browser shares.
@@ -455,12 +561,24 @@
       topSites: namespace("topSites", { get: (callback) => data("topSites.get", {}, callback) }),
     });
     chrome.sessions.MAX_SESSION_RESULTS = 25;
-    // Present so a background that listens at start keeps running; WebKitGTK
-    // gives the port no hook into requests, so these events never fire.
+    // onBeforeRequest sees every request a page makes, and may block it;
+    // WebKitGTK gives the port no hook later in a request's life, so the
+    // other events are present but never fire.
+    const webRequest = { handlerBehaviorChanged: answer(undefined), MAX_HANDLER_BEHAVIOR_CHANGED_CALLS_PER_10_MINUTES: 20 };
+    for (const [name, target] of webRequestEvents) {
+      webRequest[name.slice("webRequest.".length)] = target;
+    }
+    // Firefox's enums; extensions read the types they may filter on here.
+    webRequest.ResourceType = Object.fromEntries(
+      ["main_frame", "sub_frame", "stylesheet", "script", "image", "font", "object", "xmlhttprequest", "ping",
+        "beacon", "xslt", "csp_report", "media", "websocket", "web_manifest", "imageset", "other"]
+        .map((type) => [type.toUpperCase(), type]),
+    );
+    webRequest.OnBeforeRequestOptions = { BLOCKING: "blocking", REQUEST_BODY: "requestBody", EXTRA_HEADERS: "extraHeaders" };
+    webRequest.OnBeforeSendHeadersOptions = { REQUEST_HEADERS: "requestHeaders", BLOCKING: "blocking", EXTRA_HEADERS: "extraHeaders" };
+    webRequest.OnHeadersReceivedOptions = { BLOCKING: "blocking", RESPONSE_HEADERS: "responseHeaders", EXTRA_HEADERS: "extraHeaders" };
     Object.assign(chrome, {
-      webRequest: namespace("webRequest", { handlerBehaviorChanged: answer(undefined) },
-        ["onBeforeRequest", "onBeforeSendHeaders", "onSendHeaders", "onHeadersReceived", "onAuthRequired",
-          "onResponseStarted", "onBeforeRedirect", "onCompleted", "onErrorOccurred"]),
+      webRequest,
       downloads: namespace("downloads", {
         download: (options, callback) => settle(saveDownload(options || {}), callback),
         search: undefined, erase: undefined, cancel: undefined,
@@ -473,18 +591,18 @@
         }),
       }, ["onInstalled", "onUninstalled", "onEnabled", "onDisabled"]),
     });
-    // Firefox's contentScripts.register, over scripting's registrations: the
-    // promise gives an object that unregisters them. Files only.
+    // Firefox's contentScripts.register, over scripting's
+    // registrations: the promise gives an object that unregisters them. Code
+    // goes along as text, kept by the browser until it is unregistered.
     chrome.contentScripts = {
       register: async (options) => {
         const files = (list) => (list || []).map((entry) => entry.file).filter(Boolean);
-        if ((options.js || []).some((entry) => !entry.file) || (options.css || []).some((entry) => !entry.file)) {
-          throw new Error("contentScripts.register takes files only on Linux.");
-        }
+        const code = (list) => (list || []).map((entry) => entry.code).filter((text) => typeof text === "string");
+        if (options.world === "MAIN") throw new Error("Content scripts in the page's own world are not available on Linux yet.");
         const id = `zephium-registered-${Date.now()}-${nextRequest}`;
         await request("scripting.registerContentScripts", [[{
           id, matches: options.matches, excludeMatches: options.excludeMatches,
-          js: files(options.js), css: files(options.css),
+          js: files(options.js), css: files(options.css), jsCode: code(options.js), cssCode: code(options.css),
           runAt: options.runAt, allFrames: options.allFrames, persistAcrossSessions: false,
         }]]);
         return { unregister: () => request("scripting.unregisterContentScripts", [{ ids: [id] }]) };

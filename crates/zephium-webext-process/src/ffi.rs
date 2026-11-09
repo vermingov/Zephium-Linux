@@ -1,6 +1,7 @@
-//! The WebKitGTK 4.1 web-process API and the JavaScriptCore GLib API this
-//! plugin calls, declared from /usr/include/webkitgtk-4.1. WebKit objects are
-//! opaque here; only their pointers cross this boundary.
+//! The WebKitGTK 4.1 web-process API, the JavaScriptCore GLib API and the one
+//! libsoup 3 call this plugin makes, declared from /usr/include/webkitgtk-4.1
+//! and /usr/include/libsoup-3.0. WebKit objects are opaque here; only their
+//! pointers cross this boundary.
 
 use std::ffi::{c_char, c_int, c_uint, c_void};
 
@@ -12,6 +13,8 @@ pub type WebKitWebPage = c_void;
 pub type WebKitFrame = c_void;
 pub type WebKitScriptWorld = c_void;
 pub type WebKitUserMessage = c_void;
+pub type WebKitURIRequest = c_void;
+pub type SoupMessageHeaders = c_void;
 pub type JSCContext = c_void;
 pub type JSCValue = c_void;
 pub type JSCException = c_void;
@@ -38,6 +41,12 @@ unsafe extern "C" {
 
     pub fn webkit_web_page_get_id(page: *mut WebKitWebPage) -> u64;
     pub fn webkit_web_page_get_main_frame(page: *mut WebKitWebPage) -> *mut WebKitFrame;
+    pub fn webkit_web_page_get_uri(page: *mut WebKitWebPage) -> *const c_char;
+
+    pub fn webkit_uri_request_get_uri(request: *mut WebKitURIRequest) -> *const c_char;
+    pub fn webkit_uri_request_set_uri(request: *mut WebKitURIRequest, uri: *const c_char);
+    pub fn webkit_uri_request_get_http_method(request: *mut WebKitURIRequest) -> *const c_char;
+    pub fn webkit_uri_request_get_http_headers(request: *mut WebKitURIRequest) -> *mut SoupMessageHeaders;
     pub fn webkit_web_page_send_message_to_view(
         page: *mut WebKitWebPage,
         message: *mut WebKitUserMessage,
@@ -55,6 +64,11 @@ unsafe extern "C" {
     pub fn webkit_user_message_get_parameters(message: *mut WebKitUserMessage) -> *mut GVariant;
     pub fn webkit_user_message_get_name(message: *mut WebKitUserMessage) -> *const c_char;
     pub fn webkit_user_message_send_reply(message: *mut WebKitUserMessage, reply: *mut WebKitUserMessage);
+}
+
+#[link(name = "soup-3.0")]
+unsafe extern "C" {
+    pub fn soup_message_headers_get_one(headers: *mut SoupMessageHeaders, name: *const c_char) -> *const c_char;
 }
 
 #[link(name = "javascriptcoregtk-4.1")]
