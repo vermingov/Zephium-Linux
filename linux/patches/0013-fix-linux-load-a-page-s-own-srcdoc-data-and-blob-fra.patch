@@ -1,0 +1,120 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Verm <183540171+vermingov@users.noreply.github.com>
+Date: Sun, 8 Nov 2026 17:31:38 +0100
+Subject: [PATCH 13/13] fix(linux): load a page's own srcdoc, data: and blob:
+ frames
+
+Cloudflare's challenge stayed on "Verifying..." in Zephium while plain
+WebKitGTK passed it: WebKitGTK asks the navigation handler about every
+frame without naming one, and the handler refused srcdoc, data: and
+blob: documents, which challenge and payment widgets are built from.
+
+- They are judged as about:blank there, as macOS judges a subframe's.
+- WebKitGTK names the frame only at the response, so the platform layer
+  refuses them there as a tab's own document, as before.
+---
+ .../zephium-engine/src/host/construction.rs   | 10 ++++
+ .../src/platform/linux/frame_documents.rs     | 52 +++++++++++++++++++
+ .../zephium-engine/src/platform/linux/mod.rs  |  2 +
+ 3 files changed, 64 insertions(+)
+ create mode 100644 crates/zephium-engine/src/platform/linux/frame_documents.rs
+
+diff --git a/crates/zephium-engine/src/host/construction.rs b/crates/zephium-engine/src/host/construction.rs
+index 740a828e..980ec968 100644
+--- a/crates/zephium-engine/src/host/construction.rs
++++ b/crates/zephium-engine/src/host/construction.rs
+@@ -1226,6 +1226,16 @@ impl EngineHost {
+                 // top (its frames count in FrameNavigationStarting); macOS
+                 // asks the Apple handler below instead.
+                 zephium_core::blocker::PageActivity::shared().note_navigation();
++                // WebKitGTK does not say which frame: a page's own srcdoc,
++                // data: and blob: frames are judged as about:blank, as macOS
++                // judges a subframe's, and the platform layer refuses them
++                // as a tab's own document.
++                #[cfg(all(unix, not(target_os = "macos")))]
++                let target = if zephium_core::navigation::is_subframe_document(&target) {
++                    "about:blank".to_owned()
++                } else {
++                    target
++                };
+                 let admitted = navigation_permit.allows_navigation(&target)
+                     && policy_navigation.admits_target(&target);
+                 // WebView2 may ask here before LaunchingExternalUriScheme; the
+diff --git a/crates/zephium-engine/src/platform/linux/frame_documents.rs b/crates/zephium-engine/src/platform/linux/frame_documents.rs
+new file mode 100644
+index 00000000..f1df446e
+--- /dev/null
++++ b/crates/zephium-engine/src/platform/linux/frame_documents.rs
+@@ -0,0 +1,52 @@
++//! A page's own srcdoc, data: and blob: frames.
++//!
++//! WebKitGTK names no frame when it asks whether a navigation may go ahead,
++//! so the navigation handler lets these documents through as about:blank, as
++//! macOS does for a subframe; challenge and payment widgets are built from
++//! them. Only the response says which frame loads, so a tab's own document
++//! is refused here instead, as it would have been before.
++
++use webkit2gtk::glib::object::Cast;
++use webkit2gtk::{
++    PolicyDecisionExt, PolicyDecisionType, ResponsePolicyDecision, ResponsePolicyDecisionExt, URIRequestExt, WebView,
++    WebViewExt,
++};
++
++pub(crate) fn keep_out_of_main_frame(view: &WebView) {
++    view.connect_decide_policy(|_, decision, kind| {
++        if kind != PolicyDecisionType::Response {
++            return false;
++        }
++        let Some(response) = decision.dynamic_cast_ref::<ResponsePolicyDecision>() else {
++            return false;
++        };
++        if !response.is_main_frame_main_resource() {
++            return false;
++        }
++        let url = response.request().and_then(|request| request.uri()).map(|uri| uri.to_string()).unwrap_or_default();
++        if !refused_in_main_frame(&url) {
++            return false;
++        }
++        decision.ignore();
++        true
++    });
++}
++
++/// The documents the navigation handler admits only for a subframe.
++fn refused_in_main_frame(url: &str) -> bool {
++    zephium_core::navigation::is_subframe_document(url) && url != "about:blank"
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn only_frame_documents_are_kept_out() {
++        assert!(refused_in_main_frame("about:srcdoc"));
++        assert!(refused_in_main_frame("data:text/html,hi"));
++        assert!(refused_in_main_frame("blob:https://example.com/5f0c"));
++        assert!(!refused_in_main_frame("about:blank"));
++        assert!(!refused_in_main_frame("https://example.com/"));
++    }
++}
+diff --git a/crates/zephium-engine/src/platform/linux/mod.rs b/crates/zephium-engine/src/platform/linux/mod.rs
+index fb0bce4e..b5abf0a3 100644
+--- a/crates/zephium-engine/src/platform/linux/mod.rs
++++ b/crates/zephium-engine/src/platform/linux/mod.rs
+@@ -6,6 +6,7 @@ mod amo_button;
+ mod content_filter;
+ pub(crate) mod extension_channel;
+ mod find;
++mod frame_documents;
+ mod fullscreen;
+ mod web_features;
+ mod stage;
+@@ -443,6 +444,7 @@ pub fn configure(
+         unsafe { context.set_data(DOWNLOAD_DENY_MARKER, true) };
+     }
+     web_features::enable(&view);
++    frame_documents::keep_out_of_main_frame(&view);
+     // Private profiles run no extensions, so they take no add-on either.
+     if !expected_ephemeral {
+         addon_download::offer_for_review(&view, partition.profile());
