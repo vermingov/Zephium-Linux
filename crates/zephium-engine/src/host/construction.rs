@@ -977,6 +977,10 @@ impl EngineHost {
                         return None;
                     }
                 };
+                // Before its first web process, the only time WebKit allows it.
+                if !matches!(partition, Partition::Ephemeral(_)) {
+                    crate::platform::imp::extension_channel::prepare_sandbox(&context);
+                }
                 pending_web_context = Some(context);
                 let Some(context) = pending_web_context.as_mut() else {
                     self.linux_unverifiable_data_managers.insert(profile);

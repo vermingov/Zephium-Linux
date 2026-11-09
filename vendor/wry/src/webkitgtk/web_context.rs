@@ -141,6 +141,10 @@ impl WebContextImpl {
     }
   }
 
+  pub(crate) fn add_path_to_sandbox(&self, path: &Path, read_only: bool) {
+    self.context.add_path_to_sandbox(path, read_only);
+  }
+
   pub(crate) fn validate_security(&self) -> crate::Result<()> {
     validate_context_security(
       self.context.is_sandbox_enabled(),

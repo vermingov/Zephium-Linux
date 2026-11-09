@@ -76,6 +76,14 @@ impl WebContext {
     })
   }
 
+  /// Show the context's web processes `path` inside their sandbox. WebKit
+  /// accepts this only before the context's first web process, and aborts
+  /// after it: call it right after creating the context, before any WebView.
+  #[cfg(gtk)]
+  pub fn add_path_to_sandbox(&self, path: &Path, read_only: bool) {
+    self.os.add_path_to_sandbox(path, read_only);
+  }
+
   /// A reference to the data directory the context was created with.
   pub fn data_directory(&self) -> Option<&Path> {
     self.data_directory.as_deref()
