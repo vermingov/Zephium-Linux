@@ -743,7 +743,8 @@ pub(super) fn tab_value(state: &mut super::ProfileExtensions, window: &Extension
         "autoDiscardable": true,
         "mutedInfo": { "muted": tab.muted() },
         "incognito": false,
-        "url": tab.url(),
+        // Chrome always gives a tab an address; extensions read it as text.
+        "url": tab.url().unwrap_or("about:blank"),
         "title": tab.title().to_string(),
         "status": if tab.loading() { "loading" } else { "complete" },
         "groupId": -1,

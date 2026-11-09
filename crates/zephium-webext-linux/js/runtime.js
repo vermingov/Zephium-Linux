@@ -23,6 +23,20 @@
   const info = JSON.parse(globalThis.__zephiumWebextInfo);
   const isContentScript = globalThis.__zephiumWebextContext === "content";
 
+  // WebKitGTK ships without requestIdleCallback, which extensions written for
+  // Chrome and Firefox call freely. Here it is a short timer, defined in the
+  // extension's own world: the page's world never sees it.
+  if (typeof globalThis.requestIdleCallback !== "function") {
+    globalThis.requestIdleCallback = (callback) => {
+      const start = Date.now();
+      return setTimeout(() => callback({
+        didTimeout: false,
+        timeRemaining: () => Math.max(0, 50 - (Date.now() - start)),
+      }), 1);
+    };
+    globalThis.cancelIdleCallback = (handle) => clearTimeout(handle);
+  }
+
   // ---- Requests -------------------------------------------------------------
 
   let nextRequest = 1;
